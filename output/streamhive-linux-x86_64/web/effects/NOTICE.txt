@@ -1,3 +1,0 @@
-LiveKit track-processors 0.8.2: https://github.com/livekit/track-processors-js
-MediaPipe tasks-vision 0.10.14 and selfie segmenter float16 v1: https://github.com/google-ai-edge/mediapipe
-Components licensed under Apache-2.0; see LICENSE.
