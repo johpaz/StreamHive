@@ -89,6 +89,14 @@ El anfitrión elige **Identidad del programa → Fondo del escenario**: color s�
 
 Referencias: [procesadores oficiales de LiveKit](https://github.com/livekit/track-processors-js/blob/main/processor-docs/video-processors.md), [ciclo de vida de LocalTrack en SDK 2.23.0](https://github.com/livekit/client-sdk-js/blob/v2.23.0/src/room/track/LocalTrack.ts).
 
+## Pantallas de inicio, pausa y fin
+
+`Data.slates` guarda la configuración y `Data.active_slate` la pantalla al aire. Viven fuera de `Program` para que los dos formatos cambien a la vez, las escenas no las capturen y el programa se pueda preparar debajo.
+
+El compositor conserva la misma raíz `.stage`, porque la captura guarda esa referencia. `slateProgram` deriva un programa sin personas, micrófonos ni contenido; `Stage` lo dibuja y `Renderer` lo usa con `allowedTrack`, de modo que esas pistas ni se suscriben. La música es un `<audio>` que solo monta el renderer y que `AudioMixer` engancha a la mezcla.
+
+El fin del temporizador lo aplica una tarea de `tokio` si sigue al aire esa misma pantalla; `reconcile` hace de respaldo. La pantalla activa se limpia al terminar la sesión y al arrancar el servidor.
+
 ## Programas horizontal y vertical
 
 `Data.program` conserva el programa 16:9 y `Data.portrait_program` guarda el 9:16. Cada uno tiene su propia revisión. Las escenas guardadas contienen nombre, formato y una copia del programa; activarlas incrementa la revisión del formato correspondiente. Retirar participantes limpia ambos programas y las escenas. El acceso a archivos del renderer y la protección contra borrado consideran ambos programas; las escenas guardadas también protegen los archivos referenciados.

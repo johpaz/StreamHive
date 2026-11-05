@@ -52,6 +52,8 @@ pub enum Layout {
     #[default]
     Grid,
     Spotlight,
+    /// Una cámara grande y el resto en una tira.
+    Featured,
     Screen,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -153,6 +155,7 @@ impl Default for Program {
         }
     }
 }
+pub const MAX_ON_SCREEN: usize = 6;
 /// Pantallas genéricas que sustituyen al programa: inicio, pausa y fin.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -161,9 +164,34 @@ pub enum SlateKind {
     Pause,
     End,
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SlateStyle {
+    #[default]
+    Colmena,
+    Aurora,
+    Lineas,
+    Liso,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LogoPosition {
+    #[default]
+    Top,
+    Corner,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Slate {
+    /// Diseño del fondo generado; una imagen propia lo sustituye.
+    pub style: SlateStyle,
+    /// Color de la marca: tiñe el diseño, la línea de marca y el filete.
+    pub accent: String,
+    /// Línea corta sobre el título, por ejemplo el nombre del canal.
+    pub brand_line: String,
+    pub logo_position: LogoPosition,
+    /// Logo propio de las pantallas; sin él se usa el del programa.
+    pub logo_asset: Option<String>,
     pub title: String,
     pub subtitle: String,
     /// Duración del temporizador; 0 significa sin temporizador.
@@ -184,6 +212,11 @@ pub struct Slate {
 impl Default for Slate {
     fn default() -> Self {
         Self {
+            style: SlateStyle::default(),
+            accent: "#b9ee79".into(),
+            brand_line: String::new(),
+            logo_position: LogoPosition::default(),
+            logo_asset: None,
             title: "Empezamos pronto".into(),
             subtitle: String::new(),
             timer_seconds: 0,
@@ -248,7 +281,9 @@ impl Slates {
     }
     pub fn uses_asset(&self, asset: &str) -> bool {
         [&self.start, &self.pause, &self.end].iter().any(|s| {
-            s.background_asset.as_deref() == Some(asset) || s.music_asset.as_deref() == Some(asset)
+            [&s.background_asset, &s.music_asset, &s.logo_asset]
+                .iter()
+                .any(|a| a.as_deref() == Some(asset))
         })
     }
 }
@@ -357,6 +392,13 @@ pub struct Data {
     /// Carpeta elegida para las grabaciones nuevas; sin valor se usa la predeterminada.
     #[serde(default)]
     pub recordings_dir: Option<String>,
+    /// Cámaras que pueden estar en pantalla a la vez, por formato.
+    /// Sin valor, el máximo de la app.
+    #[serde(default)]
+    pub on_screen_limit: Option<usize>,
+    /// Invitados admitidos en la sala; sin valor, el máximo del servidor.
+    #[serde(default)]
+    pub admitted_limit: Option<usize>,
     #[serde(default)]
     pub slates: Slates,
     /// Pantalla al aire. Vive fuera del programa: afecta a los dos formatos a la vez,
@@ -380,6 +422,9 @@ impl Recording {
     }
 }
 impl Data {
+    pub fn on_screen_cap(&self) -> usize {
+        self.on_screen_limit.unwrap_or(MAX_ON_SCREEN)
+    }
     pub fn validate_slate(&self, slate: &Slate) -> Result<(), &'static str> {
         let line = |text: &str| text.chars().count() <= 60 && !text.chars().any(char::is_control);
         if slate.title.trim().is_empty() {
@@ -390,6 +435,7 @@ impl Data {
             &slate.subtitle,
             &slate.timer_label,
             &slate.done_label,
+            &slate.brand_line,
         ]
         .iter()
         .all(|text| line(text))
@@ -399,11 +445,21 @@ impl Data {
         if slate.timer_seconds > 21_600 {
             return Err("El temporizador admite hasta 6 horas");
         }
-        if slate.background.len() != 7
-            || !slate.background.starts_with('#')
-            || !slate.background[1..].bytes().all(|b| b.is_ascii_hexdigit())
-        {
+        let color = |c: &str| {
+            c.len() == 7 && c.starts_with('#') && c[1..].bytes().all(|b| b.is_ascii_hexdigit())
+        };
+        if !color(&slate.background) {
             return Err("Color de fondo inválido");
+        }
+        if !color(&slate.accent) {
+            return Err("Color de acento inválido");
+        }
+        if slate
+            .logo_asset
+            .as_ref()
+            .is_some_and(|id| !self.assets.get(id).is_some_and(|a| a.kind == "image"))
+        {
+            return Err("Selecciona una imagen existente para el logo");
         }
         if slate
             .background_asset
@@ -488,8 +544,14 @@ impl Data {
         if p.revision != self.program_for(format).revision {
             return Err("La escena cambió; actualiza antes de guardar");
         }
-        if p.identities.len() > 6 {
+        if p.identities.len() > MAX_ON_SCREEN {
             return Err("Máximo seis cámaras");
+        }
+        // Bajar el cupo no saca a nadie: solo impide añadir más.
+        if p.identities.len() > self.on_screen_cap()
+            && p.identities.len() > self.program_for(format).identities.len()
+        {
+            return Err("Cupo de cámaras en pantalla completo: quita a alguien o sube el cupo");
         }
         let mut unique = std::collections::HashSet::new();
         for identity in p

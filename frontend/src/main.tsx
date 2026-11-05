@@ -557,7 +557,11 @@ function App() {
                 </div>
                 <div className="output-row">
                   <span>Estudio</span>
-                  <b>Hasta 6 personas</b>
+                  <b>
+                    {studio?.limits
+                      ? `Hasta ${studio.limits.on_screen} en pantalla y ${studio.limits.admitted} invitados en sala`
+                      : "Comprobando…"}
+                  </b>
                 </div>
                 <p className="hint">
                   Duración máxima: 2 horas. Al bajar de 1 GB libre se detiene

@@ -12,6 +12,8 @@ import {
 } from "./media";
 import {
   cameraPositions,
+  featuredPositions,
+  visibleIdentities,
   playbackTime,
   playbackFinished,
   assetUrl,
@@ -206,24 +208,11 @@ export function Stage({
   const find = (id: string) => people.find((p) => p.identity === id);
   const content = program.layout === "screen";
   const mode = program.content_mode || "side";
-  const ids =
-    program.layout === "spotlight"
-      ? program.spotlight
-        ? [program.spotlight]
-        : []
-      : content && mode === "pip"
-        ? program.identities.length
-          ? [
-              program.spotlight &&
-              program.identities.includes(program.spotlight)
-                ? program.spotlight
-                : program.identities[0],
-            ]
-          : []
-        : content && mode === "full"
-          ? []
-          : program.identities;
-  const positions = cameraPositions(ids.length, format);
+  const ids = visibleIdentities(program);
+  const positions =
+    program.layout === "featured"
+      ? featuredPositions(ids.length, format)
+      : cameraPositions(ids.length, format);
   const screen =
     content && program.screen
       ? publication(find(program.screen), "screen_share")
@@ -333,6 +322,7 @@ export function Stage({
           renderToken={renderToken}
           preview={slatePreview}
           format={format}
+          programLogo={base.logo}
         />
       )}
       {!slate && !ids.length && !content && !backgroundAsset && (

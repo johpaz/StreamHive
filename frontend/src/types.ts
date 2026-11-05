@@ -1,4 +1,4 @@
-export type Layout = "grid" | "spotlight" | "screen";
+export type Layout = "grid" | "spotlight" | "featured" | "screen";
 export type OutputFormat = "landscape" | "portrait";
 export type DestinationStatus = "ready" | "disabled" | "connecting" | "live" | "reconnecting" | "finished";
 export const destinationLabels: Record<DestinationStatus, string> = {
@@ -20,7 +20,13 @@ export interface Asset {
   created: number;
 }
 export type SlateKind = "start" | "pause" | "end";
+export type SlateStyle = "colmena" | "aurora" | "lineas" | "liso";
 export interface Slate {
+  style: SlateStyle;
+  accent: string;
+  brand_line: string;
+  logo_position: "top" | "corner";
+  logo_asset: string | null;
   title: string;
   subtitle: string;
   timer_seconds: number;
@@ -94,6 +100,7 @@ export interface Studio {
   /// Si cada servicio puede cambiar con la sesión en marcha (motor local).
   independent_services?: boolean;
   assets: Asset[];
+  limits?: { on_screen: number; admitted: number; max_admitted: number };
   slates?: Slates;
   active_slate?: ActiveSlate | null;
   server_time_ms: number;

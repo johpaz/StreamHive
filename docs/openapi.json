@@ -2070,6 +2070,221 @@
           }
         }
       ]
+    },
+    "/api/v1/slates/{kind}": {
+      "put": {
+        "summary": "Configure the start, pause or end slate (admin)",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "start",
+                "pause",
+                "end"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "title"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "subtitle": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "timer_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 21600
+                  },
+                  "timer_label": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "done_label": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "background": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{6}$"
+                  },
+                  "background_asset": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "show_logo": {
+                    "type": "boolean"
+                  },
+                  "music_asset": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "music_volume": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "auto_on_timer_end": {
+                    "type": "boolean"
+                  },
+                  "show_on_go_live": {
+                    "type": "boolean"
+                  },
+                  "style": {
+                    "type": "string",
+                    "enum": [
+                      "colmena",
+                      "aurora",
+                      "lineas",
+                      "liso"
+                    ]
+                  },
+                  "accent": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{6}$"
+                  },
+                  "brand_line": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "logo_position": {
+                    "type": "string",
+                    "enum": [
+                      "top",
+                      "corner"
+                    ]
+                  },
+                  "logo_asset": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/slates/{kind}/show": {
+      "post": {
+        "summary": "Put a slate on air, replacing cameras, microphones and content in every format (admin)",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "start",
+                "pause",
+                "end"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/slates/hide": {
+      "post": {
+        "summary": "Return to the program (admin)",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/settings/limits": {
+      "put": {
+        "summary": "Set the guest quota for the room and the camera quota on screen (admin)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "on_screen",
+                  "admitted"
+                ],
+                "properties": {
+                  "on_screen": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 6
+                  },
+                  "admitted": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
     }
   },
   "components": {

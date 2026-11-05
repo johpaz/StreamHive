@@ -89,6 +89,26 @@ Subir un archivo no lo pone en programa. Pulsa **Mostrar** para seleccionarlo y 
 
 En **Audio**, el control **Micrófonos en programa** permite retirarlos del audio de salida sin silenciar la conversación de la sala. El audio de pantalla exige permiso del navegador y habilitación explícita en el programa. Los archivos seleccionados no se pueden eliminar hasta retirarlos.
 
+## Invitados y reparto de la pantalla
+
+La entrada tiene dos pasos que decides tú. **Admitir** pasa a un invitado de la sala de espera a la sala, donde habla contigo pero el público no lo ve ni lo oye. El botón **+** de Fuentes › Participantes lo saca al aire, en el formato que estés editando.
+
+En esa misma pestaña defines dos cupos: **invitados en sala** y **cámaras en pantalla** (de 1 a 6). Bajar un cupo no saca a nadie: solo impide admitir o añadir a más.
+
+Composiciones: **Conversación** (todas iguales), **Protagonista** (una cámara), **Con acompañantes** (una grande y el resto en una tira), **Tutorial técnico** (contenido y cámaras), **Cámara flotante** (contenido y una cámara) y **Solo contenido**. Quien está en la lista suena aunque la composición no muestre su cámara; el estudio lo avisa con «1 cámara visible · 6 voces al aire».
+
+## Modo foco y pantallas de inicio, pausa y fin
+
+Al empezar una sesión, Mi estudio pasa a **modo foco**: se ocultan la barra lateral y los menús, y quedan el escenario, una franja de estado, un panel plegable (Escenas, Fuentes, Ajustes) y una barra inferior con las pantallas, la composición y los botones de emisión. **Salir del foco** dura hasta la siguiente sesión; **Modo foco** permite entrar a mano para ensayar. Fuera del foco, la barra lateral se puede plegar a un riel de iconos.
+
+Las pantallas se configuran en **Configuración** y se activan desde la barra inferior. Mientras una está al aire, cámaras, micrófonos, pantallas compartidas y archivos quedan fuera de la emisión en los dos formatos; el programa se puede seguir preparando debajo, y **Volver al programa** lo recupera.
+
+- **Inicio** se muestra sola al iniciar el directo. Se puede desactivar en su configuración.
+- El temporizador es manual al llegar a cero, salvo que se active su casilla: Inicio y Pausa vuelven solas al programa, y Fin termina el directo **y la grabación**.
+- Diseño de marca: fondo Colmena, Aurora, Líneas o Liso, teñido con tu color de fondo y el de tu marca; línea de marca y logo arriba o en la esquina. Una imagen propia sustituye al diseño, y **Aplicar este diseño a las tres pantallas** las iguala.
+- Cada pantalla admite música de fondo (MP3, OGG, WAV o M4A, hasta 50 MB) o silencio. Emite solo música sobre la que tengas derechos.
+- Las pantallas también quedan en la grabación. Un video del programa sigue avanzando mientras está cubierto.
+
 ## Datos, límites y recuperación
 
 - `runtime/data/assets`: biblioteca de imágenes y videos; inclúyela en los respaldos del volumen de datos.
@@ -141,6 +161,8 @@ El comando construye el backend, intenta preparar el SDK y arranca API e interfa
 En Linux x86-64, el comando instala el binario oficial de LiveKit si falta, verifica su SHA-256 e inicia una sala local en `ws://localhost:7880`. Si defines `LIVEKIT_INTERNAL_URL`, usa tu motor existente. La web local usa FFmpeg por defecto para grabar y transmitir mediante RTMP/RTMPS, sin Redis ni Egress. Requiere FFmpeg instalado (`FFMPEG_BIN` permite indicar su ruta). El navegador ejecuta el compositor: mantén la pestaña abierta durante el directo. Las grabaciones quedan en `runtime/review/recordings`. `ENGINE=egress` permite usar un despliegue Egress externo si ya está configurado.
 
 Abre `http://localhost:5173` desde el mismo equipo. Antes de conectar puedes probar cámara y micrófono por separado, seleccionar dispositivos y ver el nivel del micrófono. Permite el acceso cuando lo solicite el navegador. HTTP mediante una IP de red no habilita captura: para otro equipo necesitas HTTPS y direcciones de medios accesibles.
+
+Prueba del modo foco y las pantallas: `CHROMIUM_PATH=/ruta/a/chrome bun scripts/slates-e2e.mjs`. Usa dos compositores y receptores RTMP locales, y mide en los MP4 el temporizador, el silencio del micrófono y la música.
 
 Prueba del envío local: `CHROMIUM_PATH=/ruta/a/chrome bun scripts/local-stream-e2e.mjs`. Arranca el lanzador con datos aislados, comprueba el compositor del navegador, la recepción RTMP de H.264/AAC y la grabación MP4; no usa tu clave ni publica en plataformas reales.
 

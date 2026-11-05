@@ -95,6 +95,11 @@ fn denied() -> Error {
     Error(StatusCode::UNAUTHORIZED, "Acceso no autorizado".into())
 }
 impl App {
+    fn admitted_cap(&self, d: &Data) -> usize {
+        d.admitted_limit
+            .unwrap_or(self.max_guests)
+            .min(self.max_guests)
+    }
     /// URL de señalización de LiveKit para este cliente. Con `LIVEKIT_PUBLIC_URL=auto` (modo escritorio)
     /// cuelga del mismo origen que el estudio (`/lk`, ver `livekit_proxy`): así funciona igual en
     /// http://localhost, en HTTPS de la LAN o tras un túnel, sin contenido mixto ni puertos extra.
@@ -426,6 +431,7 @@ async fn studio(State(s): State<App>, h: HeaderMap) -> Reply {
     s.participant(&h).await?;
     let d = s.data.lock().await;
     let mut v = snapshot(&d);
+    v["limits"] = json!({"on_screen":d.on_screen_cap(),"admitted":s.admitted_cap(&d),"max_admitted":s.max_guests});
     if let Some(b) = v.get_mut("broadcast").and_then(|v| v.as_object_mut()) {
         b.remove("renderer_hash");
     }
@@ -611,6 +617,13 @@ async fn participant_action(
                         .values()
                         .filter(|p| p.status == "admitted")
                         .count();
+                    let cap = s.admitted_cap(&d);
+                    // Sin cupo propio decide el límite del servidor, más abajo.
+                    if d.admitted_limit.is_some() && admitted >= cap {
+                        return Err(bad(&format!(
+                            "Cupo de invitados completo ({cap}): súbelo o saca a alguien de la sala"
+                        )));
+                    }
                     let live = d.active().is_some_and(|b| b.status == "live");
                     monitor::admission(
                         s.monitor.snapshot().0.as_ref(),
@@ -699,6 +712,13 @@ async fn scene_activate(State(s): State<App>, h: HeaderMap, Path(id): Path<Strin
         .ok_or_else(|| bad("Escena inexistente"))?;
     let mut p = scene.program;
     p.revision = d.program_for(scene.format).revision;
+    if p.identities.len() > d.on_screen_cap() {
+        return Err(bad(&format!(
+            "La escena tiene {} cámaras y el cupo en pantalla es {}",
+            p.identities.len(),
+            d.on_screen_cap()
+        )));
+    }
     d.validate_program_for(&p, scene.format).map_err(bad)?;
     p.revision += 1;
     // Restart a saved clip from its stored position, never from an old wall-clock timestamp.
@@ -716,6 +736,29 @@ async fn scene_remove(State(s): State<App>, h: HeaderMap, Path(id): Path<String>
     if previous == d.scenes.len() {
         return Err(bad("Escena inexistente"));
     }
+    s.persist(&mut d)?;
+    Ok(Json(json!({"ok":true})))
+}
+#[derive(Deserialize)]
+struct Limits {
+    on_screen: usize,
+    admitted: usize,
+}
+async fn limits_update(State(s): State<App>, h: HeaderMap, Json(body): Json<Limits>) -> Reply {
+    s.admin(&h)?;
+    if !(1..=MAX_ON_SCREEN).contains(&body.on_screen) {
+        return Err(bad("El cupo en pantalla admite de 1 a 6 cámaras"));
+    }
+    if body.admitted > s.max_guests {
+        return Err(bad(&format!(
+            "Este servidor admite hasta {} invitados",
+            s.max_guests
+        )));
+    }
+    let _guard = s.operations.lock().await;
+    let mut d = s.data.lock().await;
+    d.on_screen_limit = Some(body.on_screen);
+    d.admitted_limit = Some(body.admitted);
     s.persist(&mut d)?;
     Ok(Json(json!({"ok":true})))
 }
@@ -1644,14 +1687,16 @@ async fn resources(State(s): State<App>, h: HeaderMap) -> Reply {
     let Some(sample) = sample else {
         return Ok(Json(json!({"ready":false})));
     };
-    let admitted = s
-        .data
-        .lock()
-        .await
-        .participants
-        .values()
-        .filter(|p| p.status == "admitted")
-        .count();
+    let (admitted, cap) = {
+        let d = s.data.lock().await;
+        (
+            d.participants
+                .values()
+                .filter(|p| p.status == "admitted")
+                .count(),
+            s.admitted_cap(&d),
+        )
+    };
     let advice = monitor::advise(
         &sample,
         &monitor::Load {
@@ -1664,8 +1709,8 @@ async fn resources(State(s): State<App>, h: HeaderMap) -> Reply {
     Ok(Json(json!({
         "ready":true,"sample":sample,"history":history,"encoder":encoder,
         "participants":participants,"on_program":on_program,"live":live,"advice":advice,
-        "admitted":admitted,"max_guests":s.max_guests,
-        "can_admit":monitor::admission(Some(&sample),admitted,s.max_guests,encoder.as_ref(),live).is_ok()
+        "admitted":admitted,"max_guests":cap,
+        "can_admit":monitor::admission(Some(&sample),admitted,cap,encoder.as_ref(),live).is_ok()
     })))
 }
 async fn render_ack(State(s): State<App>, h: HeaderMap, Json(body): Json<Ack>) -> Reply {
@@ -2404,6 +2449,7 @@ fn router(s: App) -> Router {
             "/api/v1/settings/recordings",
             get(recordings_location_get).put(recordings_location_put),
         )
+        .route("/api/v1/settings/limits", put(limits_update))
         .route("/api/v1/slates/hide", post(slate_hide))
         .route("/api/v1/slates/{kind}", put(slate_update))
         .route("/api/v1/slates/{kind}/show", post(slate_show))
@@ -4216,6 +4262,124 @@ mod api_tests {
         assert!(!format!("{:?}", d.destinations).contains("new-secret"));
     }
     #[tokio::test]
+    async fn limits_cap_the_room_and_the_screen_without_removing_anyone() {
+        let s = app();
+        let admin = Some(("host", "admin"));
+        let path = "/api/v1/settings/limits";
+        let (_, _, studio) = call(&s, "GET", "/api/v1/studio", admin, Value::Null).await;
+        assert_eq!(studio["limits"]["on_screen"], 6);
+        assert_eq!(studio["limits"]["admitted"], s.max_guests);
+        assert_ne!(
+            call(
+                &s,
+                "PUT",
+                path,
+                Some(("guest", "guest")),
+                json!({"on_screen":2,"admitted":1})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        for invalid in [
+            json!({"on_screen":0,"admitted":1}),
+            json!({"on_screen":7,"admitted":1}),
+            json!({"on_screen":2,"admitted":s.max_guests + 1}),
+        ] {
+            assert_eq!(
+                call(&s, "PUT", path, admin, invalid).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            call(&s, "PUT", path, admin, json!({"on_screen":2,"admitted":1}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        // Sala: admite hasta el cupo; quien espera sigue esperando.
+        waiting(&s, "ana").await;
+        waiting(&s, "beto").await;
+        let admit = json!({"action":"admit"});
+        assert_eq!(
+            call(&s, "POST", "/api/v1/participants/ana", admin, admit.clone())
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (c, _, body) = call(
+            &s,
+            "POST",
+            "/api/v1/participants/beto",
+            admin,
+            admit.clone(),
+        )
+        .await;
+        assert_eq!(c, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("Cupo de invitados")
+        );
+        assert_eq!(s.data.lock().await.participants["beto"].status, "waiting");
+        // Pantalla: el cupo impide añadir, no modificar lo que ya está.
+        call(&s, "PUT", path, admin, json!({"on_screen":2,"admitted":2})).await;
+        assert_eq!(
+            call(&s, "POST", "/api/v1/participants/beto", admin, admit)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let mut program = s.data.lock().await.program.clone();
+        program.identities = vec!["host".into(), "ana".into(), "beto".into()];
+        let (c, _, body) = call(&s, "PUT", "/api/v1/program", admin, json!(program)).await;
+        assert_eq!(c, StatusCode::CONFLICT, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("Cupo de cámaras"));
+        program.identities = vec!["host".into(), "ana".into()];
+        program.layout = Layout::Featured;
+        assert_eq!(
+            call(&s, "PUT", "/api/v1/program", admin, json!(program))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (_, _, scene) = call(
+            &s,
+            "POST",
+            "/api/v1/scenes",
+            admin,
+            json!({"name":"Dos","format":"landscape"}),
+        )
+        .await;
+        assert_eq!(scene["program"]["layout"], "featured");
+        call(&s, "PUT", path, admin, json!({"on_screen":1,"admitted":2})).await;
+        assert_eq!(s.data.lock().await.program.identities.len(), 2);
+        let mut same = s.data.lock().await.program.clone();
+        same.names = !same.names;
+        assert_eq!(
+            call(&s, "PUT", "/api/v1/program", admin, json!(same))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (c, _, body) = call(
+            &s,
+            "POST",
+            &format!("/api/v1/scenes/{}/activate", scene["id"].as_str().unwrap()),
+            admin,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(c, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("cupo"));
+        // Datos anteriores conservan el máximo.
+        let mut old = json!(Data::default());
+        old.as_object_mut().unwrap().remove("on_screen_limit");
+        let old: Data = serde_json::from_value(old).unwrap();
+        assert_eq!(old.on_screen_cap(), 6);
+    }
+    #[tokio::test]
     async fn slates_are_admin_only_validated_and_stay_out_of_scenes() {
         let s = app();
         let admin = Some(("host", "admin"));
@@ -4263,9 +4427,13 @@ mod api_tests {
             json!({"title":"x","music_volume":2.0}),
             json!({"title":"x","background_asset":"none"}),
             json!({"title":"x","music_asset":"none"}),
+            json!({"title":"x","accent":"verde"}),
+            json!({"title":"x","style":"neon"}),
+            json!({"title":"x","logo_asset":"none"}),
+            json!({"title":"x","brand_line":"y".repeat(61)}),
         ] {
             let (c, ..) = call(&s, "PUT", "/api/v1/slates/pause", admin, invalid.clone()).await;
-            assert_eq!(c, StatusCode::BAD_REQUEST, "{invalid}");
+            assert!(c.is_client_error(), "{invalid}");
         }
         assert_eq!(s.data.lock().await.slates.pause.title, "Volvemos enseguida");
         let (c, _, saved) = call(
@@ -4314,6 +4482,12 @@ mod api_tests {
         fields.remove("active_slate");
         let old: Data = serde_json::from_value(old).unwrap();
         assert_eq!(old.slates.end.title, "Gracias por acompañarnos");
+        // Pantallas guardadas antes del diseño de marca reciben el estilo por defecto.
+        let older: Slate =
+            serde_json::from_value(json!({"title":"Vieja","background":"#000000"})).unwrap();
+        assert_eq!(older.style, SlateStyle::Colmena);
+        assert_eq!(older.accent, "#b9ee79");
+        assert_eq!(older.logo_position, LogoPosition::Top);
         assert!(old.active_slate.is_none());
     }
     #[tokio::test]
@@ -4444,6 +4618,15 @@ mod api_tests {
         )
         .await;
         assert_eq!(c, StatusCode::OK);
+        let (c, ..) = call(
+            &s,
+            "PUT",
+            "/api/v1/slates/pause",
+            admin,
+            json!({"title":"x","logo_asset":"song"}),
+        )
+        .await;
+        assert_eq!(c, StatusCode::BAD_REQUEST);
         // No se pueden borrar mientras una pantalla los use.
         for id in ["song", "wall"] {
             let (c, _, body) = call(

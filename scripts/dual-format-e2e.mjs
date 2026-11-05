@@ -81,6 +81,8 @@ try {
   await page.getByRole("button", { name: "Guardar destino", exact: true }).click();
   await page.getByRole("button", { name: "Añadir destino", exact: true }).waitFor();
   await page.getByRole("button", { name: /Estudio en vivo/ }).click();
+  // Mide cada programa: la pantalla de inicio es común a los dos formatos.
+  await request("/slates/start", { title: "Inicio", show_on_go_live: false }, "PUT");
   const started = await request("/broadcast/start?record=true", {});
   const waitState = async (name, expected, timeout = 30000) => {
     for (const end = Date.now() + timeout; Date.now() < end;) {

@@ -42,7 +42,8 @@ export function slateProgram(program: Program, slate: Slate): Program {
     names: false,
     background: slate.background,
     background_asset: slate.background_asset,
-    logo: slate.show_logo ? program.logo : null,
+    // Arriba lo pinta la propia pantalla; en la esquina, el sitio del logo del programa.
+    logo: slate.show_logo && slate.logo_position === "corner" && !slate.logo_asset ? program.logo : null,
   };
 }
 /** El compositor no parte líneas: un texto largo reduce su tamaño para caber en una. */

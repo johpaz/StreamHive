@@ -139,6 +139,13 @@ export function LayoutThumb({ kind }: { kind: string }) {
         </>
       ) : kind === "spotlight" ? (
         <rect x="9" y="6" width="54" height="30" rx="2" />
+      ) : kind === "featured" ? (
+        <>
+          <rect x="6" y="8" width="46" height="26" rx="2" />
+          <rect x="56" y="8" width="10" height="7" rx="1" />
+          <rect x="56" y="17.5" width="10" height="7" rx="1" />
+          <rect x="56" y="27" width="10" height="7" rx="1" />
+        </>
       ) : kind === "side" ? (
         <>
           <rect x="6" y="7" width="44" height="28" rx="2" />

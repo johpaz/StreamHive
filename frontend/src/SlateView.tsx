@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { slateBackgroundUrl } from "./slate-art";
 import { ticker } from "./compositor";
 import { assetUrl } from "./composition";
 import {
@@ -21,7 +22,13 @@ export function SlateView({
   renderToken,
   preview = false,
   format = "landscape",
+  programLogo = null,
+  size,
 }: {
+  /** Logo del programa: se usa si la pantalla no tiene uno propio. */
+  programLogo?: string | null;
+  /** Tamaño del fondo generado; por defecto, el de la emisión. */
+  size?: [number, number];
   format?: OutputFormat;
   shown: ShownSlate;
   clockOffset?: number;
@@ -46,17 +53,46 @@ export function SlateView({
   const hasTimer = remaining !== null && (preview ? slate.timer_seconds > 0 : true);
   const done = hasTimer && remaining === 0;
   const ink = slate.background_asset ? "#f5f8fa" : inkFor(slate.background);
+  const [width, height] = size ?? (format === "portrait" ? [1080, 1920] : [1920, 1080]);
+  const art = useMemo(
+    () =>
+      slate.background_asset
+        ? null
+        : slateBackgroundUrl(slate.style ?? "colmena", slate.background, slate.accent ?? "#b9ee79", width, height),
+    [slate.background_asset, slate.style, slate.background, slate.accent, width, height],
+  );
+  const logo =
+    slate.show_logo && slate.logo_position !== "corner"
+      ? slate.logo_asset
+        ? assetUrl(slate.logo_asset, renderToken)
+        : programLogo
+      : slate.show_logo && slate.logo_asset
+        ? assetUrl(slate.logo_asset, renderToken)
+        : null;
   const line = (text: string, base: number) => ({
     fontSize: `${fittedSize(text, format === "portrait" ? base * 1.6 : base)}cqw`,
     color: ink,
   });
   const timerText = done && slate.done_label ? slate.done_label : formatCountdown(remaining ?? 0);
   return (
-    <div className={`slate-view ${slate.background_asset ? "has-image" : ""}`}>
+    <div className={`slate-view ${slate.background_asset ? "has-image" : ""} logo-${slate.logo_position ?? "top"}`}>
+      {art && <img className="slate-art" src={art} alt="" aria-hidden="true" />}
+      {logo && slate.logo_position === "corner" && (
+        <img className="slate-logo-corner" src={logo} alt="Logo" />
+      )}
       <div className="slate-card">
+        {logo && slate.logo_position !== "corner" && (
+          <img className="slate-logo" src={logo} alt="Logo" />
+        )}
+        {slate.brand_line && (
+          <div className="slate-brand" style={{ ...line(slate.brand_line, 1.9), color: slate.accent }}>
+            {slate.brand_line}
+          </div>
+        )}
         <div className="slate-title" style={line(slate.title, 6)}>
           {slate.title}
         </div>
+        <div className="slate-rule" style={{ background: slate.accent }} />
         {slate.subtitle && (
           <div className="slate-subtitle" style={line(slate.subtitle, 2.6)}>
             {slate.subtitle}

@@ -3,6 +3,7 @@ import type { Asset, Layout, Program } from "./types";
 const layoutLabels: Record<Layout, string> = {
   grid: "Cuadrícula",
   spotlight: "Protagonista",
+  featured: "Protagonista y acompañantes",
   screen: "Contenido",
 };
 /** Campos que definen cómo se ve el programa; revisión y posición de reproducción no cuentan. */

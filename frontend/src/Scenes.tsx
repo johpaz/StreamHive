@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "./api";
-import { assetUrl } from "./composition";
+import { assetUrl, leadIdentity } from "./composition";
 import { describeScene, sameLook } from "./scene-summary";
 import type { OutputFormat, Program, Scene, Studio } from "./types";
 
@@ -10,7 +10,12 @@ const formatName = (format: OutputFormat) => (format === "portrait" ? "9:16" : "
 /** Esquema del montaje: fondo real y un bloque por contenido o cámara. */
 function SceneThumb({ program, format }: { program: Program; format: OutputFormat }) {
   const content = Boolean(program.screen || program.media_asset);
-  const lead = program.layout === "spotlight" ? program.spotlight : null;
+  const lead =
+    program.layout === "spotlight"
+      ? program.spotlight
+      : program.layout === "featured"
+        ? leadIdentity(program)
+        : null;
   return (
     <div
       className={`scene-thumb ${format === "portrait" ? "is-portrait" : ""} ${content || lead ? "has-lead" : ""}`}

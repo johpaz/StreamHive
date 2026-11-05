@@ -15,7 +15,7 @@ import { Icon, LayoutThumb } from "./ui";
 import { formatCountdown, shownSlate, slateNames } from "./slate";
 import { useStoredFlag } from "./useFocusMode";
 import { uploadAsset } from "./uploads";
-import { assetUrl, playbackTime, playbackFinished } from "./composition";
+import { assetUrl, playbackTime, playbackFinished, visibleIdentities } from "./composition";
 import {
   initialProgram,
   destinationLabels,
@@ -185,12 +185,12 @@ export function StudioWorkspace({
       playback: { ...initialProgram.playback },
     });
   const preset = (kind: string) => {
-    if (kind === "grid" || kind === "spotlight") {
+    if (kind === "grid" || kind === "spotlight" || kind === "featured") {
       void onProgram({
         layout: kind,
         screen: null,
         media_asset: null,
-        spotlight: kind === "spotlight" ? p.spotlight || p.identities[0] : null,
+        spotlight: kind === "grid" ? null : p.spotlight || p.identities[0],
         playback: { ...p.playback, playing: false },
       });
       return;
@@ -242,7 +242,7 @@ export function StudioWorkspace({
       identities: p.identities.includes(id)
         ? p.identities
         : [...p.identities, id],
-      ...(content && p.content_mode === "pip"
+      ...((content && p.content_mode === "pip") || p.layout === "featured"
         ? {}
         : {
             layout: "spotlight",
@@ -291,6 +291,23 @@ export function StudioWorkspace({
         <DeviceSetup />
       </section>
     );
+  const screenCap = studio.limits?.on_screen ?? 6;
+  const roomCap = studio.limits?.admitted ?? 10;
+  const guestsInRoom = cameraPeople.length - 1;
+  const roomFull = guestsInRoom >= roomCap;
+  const screenFull = p.identities.length >= screenCap;
+  const counters = (
+    <>
+      <Icon name="people" size={15} />
+      <span title="Invitados admitidos en la sala">En sala {guestsInRoom}/{roomCap}</span>
+      <span title="Cámaras en pantalla en este formato">En pantalla {p.identities.length}/{screenCap}</span>
+    </>
+  );
+  const setLimits = (patch: { on_screen?: number; admitted?: number }) =>
+    onAction(() =>
+      api("/settings/limits", "PUT", { on_screen: screenCap, admitted: roomCap, ...patch }),
+    );
+  const visibleCount = visibleIdentities(p).length;
   const usedBySlate = (id: string) =>
     slateKinds.some(
       (kind) =>
@@ -304,6 +321,7 @@ export function StudioWorkspace({
                 {[
                   { key: "grid", label: "Conversación" },
                   { key: "spotlight", label: "Protagonista" },
+                  { key: "featured", label: "Con acompañantes" },
                   { key: "side", label: "Tutorial técnico" },
                   { key: "pip", label: "Cámara flotante" },
                   { key: "full", label: "Solo contenido" },
@@ -324,7 +342,7 @@ export function StudioWorkspace({
                     }
                     disabled={
                       pending ||
-                      (item.key === "spotlight" && !p.identities.length)
+                      ((item.key === "spotlight" || item.key === "featured") && !p.identities.length)
                     }
                     onClick={() => preset(item.key)}
                   >
@@ -386,6 +404,39 @@ export function StudioWorkspace({
             </div>
             {sourceTab === "people" && (
               <>
+                {admin && (
+                  <div className="quota-controls">
+                    <label>
+                      Invitados en sala
+                      <select
+                        aria-label="Cupo de invitados en sala"
+                        value={roomCap}
+                        disabled={pending}
+                        onChange={(e) => void setLimits({ admitted: Number(e.target.value) })}
+                      >
+                        {Array.from({ length: (studio.limits?.max_admitted ?? 10) + 1 }, (_, n) => (
+                          <option key={n} value={n}>{n}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Cámaras en pantalla
+                      <select
+                        aria-label="Cupo de cámaras en pantalla"
+                        value={screenCap}
+                        disabled={pending}
+                        onChange={(e) => void setLimits({ on_screen: Number(e.target.value) })}
+                      >
+                        {[1, 2, 3, 4, 5, 6].map((n) => (
+                          <option key={n} value={n}>{n}</option>
+                        ))}
+                      </select>
+                    </label>
+                    {p.identities.length > screenCap && (
+                      <small>Hay más cámaras que el cupo: quita alguna para respetarlo.</small>
+                    )}
+                  </div>
+                )}
                 <div className="participant-list participant-strip">
                   {cameraPeople.map((person) => {
                     const participant = people.find(
@@ -461,9 +512,11 @@ export function StudioWorkspace({
                               title={
                                 on
                                   ? "Quitar del programa"
-                                  : "Añadir al programa"
+                                  : screenFull
+                                    ? `Cupo de ${screenCap} en pantalla completo`
+                                    : "Añadir al programa"
                               }
-                              disabled={pending}
+                              disabled={pending || (!on && screenFull)}
                               onClick={() => add(person)}
                             >
                               <Icon name={on ? "check" : "plus"} size={16} />
@@ -781,10 +834,11 @@ export function StudioWorkspace({
                 <div className="waiting-person" key={person.id}>
                   <span className="mini-avatar">{person.name.slice(0, 1)}</span>
                   <b>{person.name}</b>
-                  <small>Esperando admisión</small>
+                  <small>{roomFull ? `Cupo de ${roomCap} en sala completo` : "Esperando admisión"}</small>
                   <button
                     className="button primary"
-                    disabled={pending}
+                    disabled={pending || roomFull}
+                    title={roomFull ? "Sube el cupo o saca a alguien de la sala" : undefined}
                     onClick={() =>
                       onAction(() =>
                         api(`/participants/${person.id}`, "POST", {
@@ -921,7 +975,7 @@ export function StudioWorkspace({
                       )}
                     </>
                   )}
-                  {p.layout === "spotlight" && (
+                  {(p.layout === "spotlight" || p.layout === "featured") && (
                     <label>
                       Protagonista
                       <select
@@ -1149,6 +1203,8 @@ export function StudioWorkspace({
       ? "Conversación"
       : p.layout === "spotlight"
         ? "Protagonista"
+        : p.layout === "featured"
+          ? "Con acompañantes"
         : contentLabels[p.content_mode || "side"],
     p.identities.length === 1 ? "1 cámara" : `${p.identities.length} cámaras`,
   ].join(" · ");
@@ -1219,8 +1275,7 @@ export function StudioWorkspace({
         </span>
       )}
       <span className="session-meta">
-        <Icon name="people" size={15} />
-        {cameraPeople.length}/6
+        {counters}
       </span>
       {waiting.length > 0 && (
         <button
@@ -1434,8 +1489,7 @@ export function StudioWorkspace({
               : "Preparando"}
           </span>
           <span className="session-meta">
-            <Icon name="people" size={15} />
-            {cameraPeople.length}/6
+            {counters}
           </span>
           {admin && onFocus && (
             <button className="button" onClick={() => onFocus(true)}>
@@ -1509,12 +1563,10 @@ export function StudioWorkspace({
                   <Icon name="mic" size={12} /> Micrófonos fuera del programa
                 </span>
               ) : (
-                <span>
+                <span className={p.identities.length > visibleCount ? "audio-off" : ""}>
                   <Icon name="mic" size={12} />
-                  {p.identities.length}{" "}
-                  {p.identities.length === 1
-                    ? "voz seleccionada"
-                    : "voces seleccionadas"}
+                  {visibleCount === 1 ? "1 cámara visible" : `${visibleCount} cámaras visibles`} ·{" "}
+                  {p.identities.length === 1 ? "1 voz al aire" : `${p.identities.length} voces al aire`}
                 </span>
               )}
             </div>

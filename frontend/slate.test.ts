@@ -2,9 +2,11 @@ import { expect, test } from "bun:test";
 import { allowedTrack } from "./src/media";
 import { fittedSize, formatCountdown, inkFor, remainingSeconds, shownSlate, slateProgram } from "./src/slate";
 import { focusAfter } from "./src/useFocusMode";
+import { hexToRgb, mix, shiftHue } from "./src/slate-art";
 import { initialProgram, type Program, type Slate, type Slates } from "./src/types";
 
 const slate: Slate = {
+  style: "colmena", accent: "#b9ee79", brand_line: "", logo_position: "corner", logo_asset: null,
   title: "Volvemos", subtitle: "", timer_seconds: 60, timer_label: "", done_label: "",
   background: "#112233", background_asset: "wall", show_logo: false, music_asset: null,
   music_volume: 0.5, auto_on_timer_end: false, show_on_go_live: false,
@@ -42,6 +44,14 @@ test("the shown slate comes from the active kind", () => {
   expect(shownSlate(slates, null)).toBeNull();
   expect(shownSlate(null, { kind: "pause", started_at_ms: 1, ends_at_ms: 5 })).toBeNull();
   expect(shownSlate(slates, { kind: "pause", started_at_ms: 1, ends_at_ms: 5 })).toEqual({ slate: slates.pause, endsAtMs: 5 });
+});
+test("brand colours", () => {
+  expect(hexToRgb("#ff8000")).toEqual([255, 128, 0]);
+  expect(hexToRgb("roto")).toEqual([16, 25, 35]);
+  expect(mix([0, 0, 0], [255, 255, 255], 0.5)).toEqual([128, 128, 128]);
+  expect(shiftHue([255, 0, 0], 120)).toEqual([0, 255, 0]);
+  expect(shiftHue([128, 128, 128], 90)).toEqual([128, 128, 128]);
+  expect(slateProgram(initialProgram, { ...slate, show_logo: true, logo_position: "top" }).logo).toBeNull();
 });
 test("long text shrinks to fit one line and ink contrasts", () => {
   expect(fittedSize("Corto", 6)).toBe(6);
