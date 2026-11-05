@@ -3,7 +3,10 @@ import { DesktopRenderer } from "./desktop";
 import { audioMode, loadAudioMode } from "./audio-quality";
 import { RemoteSessions } from "./RemoteSessions";
 import { Scenes } from "./Scenes";
+import { Slates } from "./Slates";
+import { useFocusMode, useStoredFlag } from "./useFocusMode";
 import { Destinations } from "./Destinations";
+import { RecordingsFolder } from "./RecordingsFolder";
 import { createRoot } from "react-dom/client";
 import { api, ApiError } from "./api";
 import { useRoom } from "./media";
@@ -47,6 +50,13 @@ function App() {
     { id: string; expires: number; revoked: boolean }[]
   >([]);
   const media = useRoom();
+  const [sidebarClosed, setSidebarClosed] = useStoredFlag("streamhive.sidebar-collapsed");
+  const liveSession =
+    studio?.broadcast &&
+    ["starting", "live", "reconnecting", "ending", "uncertain"].includes(studio.broadcast.status)
+      ? studio.broadcast.id
+      : null;
+  const focusMode = useFocusMode(me?.role === "admin" ? liveSession : null);
   const [capturePreferences, setCapturePreferences] =
     useState<CapturePreferences>({});
   const joinToken = location.pathname.startsWith("/join/")
@@ -196,10 +206,29 @@ function App() {
       broadcast.status,
     ),
   );
+  const focused = admin && tab === "studio" && focusMode.focus && Boolean(studio);
+  const createInvite = () =>
+    run(async () => {
+      const i = await api<{ url: string; ca_url?: string | null }>(
+        "/invitations",
+        "POST",
+      );
+      setInvite(i.url);
+      setInviteCa(i.ca_url || "");
+    });
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${sidebarClosed ? "sidebar-collapsed" : ""} ${focused ? "focus-mode" : ""}`}>
       <DesktopRenderer key={broadcast?.id} active={admin && running} />
       <aside className="sidebar">
+        <button
+          className="sidebar-toggle"
+          aria-label={sidebarClosed ? "Abrir barra lateral" : "Plegar barra lateral"}
+          aria-expanded={!sidebarClosed}
+          title={sidebarClosed ? "Abrir barra lateral" : "Plegar barra lateral"}
+          onClick={() => setSidebarClosed(!sidebarClosed)}
+        >
+          {sidebarClosed ? "»" : "«"}
+        </button>
         <a className="brand" href="/" aria-label="StreamHive · Inicio">
           <BrandMark />StreamHive
         </a>
@@ -212,6 +241,7 @@ function App() {
         </div>
         <nav>
           <button
+            title="Estudio en vivo"
             className={tab === "studio" ? "active" : ""}
             onClick={() => setTab("studio")}
           >
@@ -220,12 +250,14 @@ function App() {
           {admin && (
             <>
               <button
+                title="Grabaciones"
                 className={tab === "recordings" ? "active" : ""}
                 onClick={() => setTab("recordings")}
               >
                 <span>▤</span> Grabaciones <b>{records.length}</b>
               </button>
               <button
+                title="Configuración"
                 className={tab === "settings" ? "active" : ""}
                 onClick={() => setTab("settings")}
               >
@@ -239,6 +271,7 @@ function App() {
             <i /> Alojado en tu servidor
           </div>
           <button
+            title="Cerrar sesión"
             className="account"
             onClick={() =>
               run(async () => {
@@ -281,16 +314,7 @@ function App() {
               <button
                 className="button"
                 disabled={pending}
-                onClick={() =>
-                  run(async () => {
-                    const i = await api<{ url: string; ca_url?: string | null }>(
-                      "/invitations",
-                      "POST",
-                    );
-                    setInvite(i.url);
-                    setInviteCa(i.ca_url || "");
-                  })
-                }
+                onClick={createInvite}
               >
                 ＋ Invitar personas (local)
               </button>
@@ -401,8 +425,8 @@ function App() {
           {tab === "studio" &&
             (studio ? (
               <>
-              {admin && <RemoteSessions version={studio} pending={pending} run={run} settings={false} onInvite={(url)=>{setInvite(url);setInviteCa("");}} />}
-              {admin && <Scenes studio={studio} format={format} onFormat={setFormat} run={run} pending={pending} />}
+              {admin && !focused && <RemoteSessions version={studio} pending={pending} run={run} settings={false} onInvite={(url)=>{setInvite(url);setInviteCa("");}} />}
+              {admin && !focused && <Scenes studio={studio} format={format} onFormat={setFormat} run={run} pending={pending} names={names} />}
               <StudioWorkspace
                 key={format}
                 format={format}
@@ -416,6 +440,10 @@ function App() {
                 onConnect={connect}
                 onPreferences={setCapturePreferences}
                 onSettings={() => setTab("settings")}
+                focus={focused}
+                onFocus={(on) => (on ? focusMode.enter() : focusMode.leave())}
+                onInvite={() => void createInvite()}
+                scenes={admin && <Scenes compact studio={studio} format={format} onFormat={setFormat} run={run} pending={pending} names={names} />}
               />
               </>
             ) : (
@@ -426,10 +454,13 @@ function App() {
               <div className="section-intro">
                 <h2>Cada conversación, a mano.</h2>
                 <p>Descarga tus programas antes de eliminarlos del servidor.</p>
+                <button className="text-button" onClick={() => setTab("settings")}>
+                  Cambiar dónde se guardan
+                </button>
               </div>
               {!records.length ? (
                 <div className="empty-panel panel">
-                  Tus grabaciones aparecerán aquí cuando inicies un directo.
+                  Tus grabaciones aparecerán aquí cuando grabes un programa.
                 </div>
               ) : (
                 <div className="recordings-grid">
@@ -447,6 +478,7 @@ function App() {
                         {(r.bytes / 1e9).toFixed(2)} GB ·{" "}
                         {Math.floor(r.duration / 60)} min
                       </p>
+                      {r.location && <p className="folder-path" title={r.location}>{r.location}</p>}
                       <span className="pill">
                         {statusLabels[r.status] || r.status}
                       </span>
@@ -461,7 +493,7 @@ function App() {
                         )}
                         <button
                           className="text-button red"
-                          disabled={running && broadcast?.id === r.id}
+                          disabled={running && r.status === "recording"}
                           onClick={() => {
                             if (
                               confirm(
@@ -486,6 +518,7 @@ function App() {
           {tab === "settings" && admin && (
             <div className="settings-grid">
               <RemoteSessions version={studio} pending={pending} run={run} settings onInvite={(url)=>{setInvite(url);setInviteCa("");}} />
+              {studio && <Slates studio={studio} run={run} pending={pending} />}
               <section className="panel">
                 <h2>Destinos de transmisión</h2>
                 <p>
@@ -502,6 +535,11 @@ function App() {
                   Crea el evento en la plataforma de destino antes de iniciar el
                   directo.
                 </p>
+              </section>
+              <section className="panel">
+                <h2>Grabaciones</h2>
+                <p>Elige dónde se guardan los archivos MP4 de tus programas.</p>
+                <RecordingsFolder pending={pending} run={run} version={studio} />
               </section>
               <section className="panel">
                 <h2>Tu servidor</h2>
@@ -522,8 +560,9 @@ function App() {
                   <b>Hasta 6 personas</b>
                 </div>
                 <p className="hint">
-                  Duración máxima: 2 horas. Al bajar de 1 GB libre se finaliza
-                  el directo para proteger la grabación.
+                  Duración máxima: 2 horas. Al bajar de 1 GB libre se detiene
+                  la grabación para proteger el archivo; el directo continúa si
+                  el motor lo permite.
                 </p>
               </section>
               <section className="panel">

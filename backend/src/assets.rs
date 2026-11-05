@@ -3,6 +3,7 @@ use axum::body::Body;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 const MAX_UPLOAD: u64 = 500 * 1024 * 1024;
+const MAX_AUDIO: u64 = 50 * 1024 * 1024;
 
 pub fn media_type(mime: &str, head: &[u8]) -> Option<(&'static str, &'static str)> {
     match mime {
@@ -13,6 +14,18 @@ pub fn media_type(mime: &str, head: &[u8]) -> Option<(&'static str, &'static str
         }
         "video/mp4" if head.get(4..8) == Some(b"ftyp") => Some(("video", "mp4")),
         "video/webm" if head.starts_with(b"\x1a\x45\xdf\xa3") => Some(("video", "webm")),
+        "audio/mpeg"
+            if head.starts_with(b"ID3")
+                || (head.first() == Some(&0xff)
+                    && head.get(1).is_some_and(|b| b & 0xe0 == 0xe0)) =>
+        {
+            Some(("audio", "mp3"))
+        }
+        "audio/ogg" if head.starts_with(b"OggS") => Some(("audio", "ogg")),
+        "audio/wav" if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WAVE") => {
+            Some(("audio", "wav"))
+        }
+        "audio/mp4" if head.get(4..8) == Some(b"ftyp") => Some(("audio", "m4a")),
         _ => None,
     }
 }
@@ -32,16 +45,29 @@ pub async fn upload(State(s): State<App>, req: Request) -> Reply {
         .next()
         .unwrap_or("")
         .to_owned();
+    // Los navegadores no coinciden en el tipo de WAV y M4A.
+    let mime = match mime.as_str() {
+        "audio/mp3" => "audio/mpeg".to_owned(),
+        "audio/x-wav" | "audio/wave" => "audio/wav".to_owned(),
+        "audio/x-m4a" | "audio/m4a" => "audio/mp4".to_owned(),
+        _ => mime,
+    };
     if ![
         "image/png",
         "image/jpeg",
         "image/webp",
         "video/mp4",
         "video/webm",
+        "audio/mpeg",
+        "audio/ogg",
+        "audio/wav",
+        "audio/mp4",
     ]
     .contains(&mime.as_str())
     {
-        return Err(bad("Admite imágenes PNG/JPG/WebP y videos MP4/WebM"));
+        return Err(bad(
+            "Admite imágenes PNG/JPG/WebP, videos MP4/WebM y audio MP3/OGG/WAV/M4A",
+        ));
     }
     let name = req
         .headers()
@@ -55,6 +81,8 @@ pub async fn upload(State(s): State<App>, req: Request) -> Reply {
     }
     let limit = if mime.starts_with("image/") {
         20 * 1024 * 1024
+    } else if mime.starts_with("audio/") {
+        MAX_AUDIO
     } else {
         MAX_UPLOAD
     };
@@ -66,7 +94,7 @@ pub async fn upload(State(s): State<App>, req: Request) -> Reply {
     if length.is_some_and(|n| n > limit) {
         return Err(Error(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "Máximo 20 MB por imagen y 500 MB por video".into(),
+            "Máximo 20 MB por imagen, 50 MB por audio y 500 MB por video".into(),
         ));
     }
     if fs2::available_space(&s.assets).map_err(|e| Error::from(anyhow::Error::new(e)))?
@@ -152,7 +180,8 @@ pub async fn file(
         if ![&d.program, &d.portrait_program].iter().any(|p| {
             p.media_asset.as_deref() == Some(&identity)
                 || p.background_asset.as_deref() == Some(&identity)
-        }) {
+        }) && !d.slates.uses_asset(&identity)
+        {
             return Err(denied());
         }
     } else {
@@ -209,6 +238,11 @@ pub async fn remove(State(s): State<App>, h: HeaderMap, Path(identity): Path<Str
     {
         return Err(bad("Retira el archivo del programa antes de eliminarlo"));
     }
+    if d.slates.uses_asset(&identity) {
+        return Err(bad(
+            "Este archivo se usa en una pantalla de inicio, pausa o fin",
+        ));
+    }
     let asset = d
         .assets
         .get(&identity)
@@ -250,5 +284,24 @@ mod tests {
             media_type("video/mp4", b"\0\0\0\x20ftypisom"),
             Some(("video", "mp4"))
         );
+    }
+    #[test]
+    fn audio_is_recognised_by_its_content() {
+        assert_eq!(media_type("audio/mpeg", b"ID3\x04"), Some(("audio", "mp3")));
+        assert_eq!(
+            media_type("audio/mpeg", b"\xff\xfb\x90"),
+            Some(("audio", "mp3"))
+        );
+        assert_eq!(media_type("audio/ogg", b"OggS\0"), Some(("audio", "ogg")));
+        assert_eq!(
+            media_type("audio/wav", b"RIFF\0\0\0\0WAVEfmt "),
+            Some(("audio", "wav"))
+        );
+        assert_eq!(
+            media_type("audio/mp4", b"\0\0\0\x20ftypM4A "),
+            Some(("audio", "m4a"))
+        );
+        assert!(media_type("audio/mpeg", b"<script>alert(1)").is_none());
+        assert!(media_type("audio/wav", b"RIFF\0\0\0\0WEBPVP8 ").is_none());
     }
 }

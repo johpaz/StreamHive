@@ -3,7 +3,7 @@
 // Uso: bun scripts/electron-e2e.mjs [E2E_SECONDS]   (requiere desktop/electron/node_modules, target/release/streamhive)
 import { _electron as electron } from "playwright";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, existsSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -47,7 +47,7 @@ try {
   assert(d.ok(), "destino: " + (await d.text()));
   await sleep(500);
   // La propia UI debe abrir el compositor a través del puente (ventana oculta del shell).
-  const start = await post("/api/v1/broadcast/start", {});
+  const start = await post("/api/v1/broadcast/start?record=true", {});
   assert(start.ok(), "start: " + (await start.text()));
   let renderer;
   for (let i = 0; i < 60 && !renderer; i++) { renderer = app.windows().find((w) => w.url().includes("/render?")); if (!renderer) await sleep(250); }
@@ -58,12 +58,34 @@ try {
   const studio = await (await page.request.get(`${origin}/api/v1/studio`)).json();
   console.log("estado:", studio.broadcast?.status, studio.broadcast?.error || "");
   { const r = await (await page.request.get(`${origin}/api/v1/resources`)).json(); console.log("codificador en uso:", r.encoder?.encoder ?? "(sin datos)"); }
-  assert((await post("/api/v1/broadcast/stop", {})).ok(), "stop");
+  assert((await post("/api/v1/broadcast/stop?all=true", {})).ok(), "stop");
   for (let i = 0; i < 80; i++) { const b = (await (await page.request.get(`${origin}/api/v1/studio`)).json()).broadcast; if (/complete|error/.test(b?.status)) break; await sleep(250); }
   const mp4 = join(rec, `${studio.broadcast.id}.mp4`);
   assert(existsSync(mp4), "No existe el MP4");
   const out = JSON.parse(execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height:format=duration", "-of", "json", mp4]).toString());
   console.log("MP4:", statSync(mp4).size, "bytes", JSON.stringify(out.streams), "duración", out.format.duration);
+  // Carpeta de grabaciones: el diálogo nativo se sustituye; el resto es la app real.
+  const chosen = join(work, "elegida");
+  mkdirSync(chosen);
+  await app.evaluate(({ dialog, shell }, folder) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [folder] });
+    globalThis.__opened = [];
+    shell.openPath = async (target) => { globalThis.__opened.push(target); return ""; };
+  }, chosen);
+  await page.getByRole("button", { name: /Configuración/ }).first().click();
+  const panel = page.locator(".recordings-folder");
+  await panel.getByText(rec, { exact: true }).waitFor();
+  await panel.getByRole("button", { name: "Elegir carpeta…" }).click();
+  await panel.getByText(chosen, { exact: true }).waitFor();
+  await panel.getByRole("button", { name: "Abrir carpeta" }).click();
+  await sleep(300);
+  const opened = await app.evaluate(() => globalThis.__opened);
+  assert(opened.length === 1 && opened[0] === chosen, "no se abrió la carpeta: " + JSON.stringify(opened));
+  const rejected = await page.evaluate((file) => window.streamhiveDesktop.openFolder(file).then(() => false, () => true), mp4);
+  assert(rejected, "folder:open aceptó un archivo");
+  await panel.getByRole("button", { name: "Usar la predeterminada" }).click();
+  await panel.getByText("Carpeta actual (predeterminada)").waitFor();
+  console.log("Carpeta de grabaciones: selector y apertura correctos");
   assert(out.streams.some((s) => s.codec_type === "video" && s.height === 1080), "sin vídeo 1080");
   assert(out.streams.some((s) => s.codec_type === "audio"), "sin audio");
   assert(Number(out.format.duration) > seconds * 0.6, "MP4 demasiado corto");

@@ -749,7 +749,7 @@
     },
     "/api/v1/broadcast/start": {
       "post": {
-        "summary": "Admin: idempotently start RTMP and automatic MP4",
+        "summary": "Admin: idempotently activate the live service; record=true also activates recording",
         "responses": {
           "200": {
             "description": "Success",
@@ -788,12 +788,23 @@
           "502": {
             "description": "Media service or persistence unavailable"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "record",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ]
       }
     },
     "/api/v1/broadcast/stop": {
       "post": {
-        "summary": "Admin: request graceful completion; poll until finalized",
+        "summary": "Admin: stop the live service, keeping an active recording; all=true ends the whole session",
         "responses": {
           "200": {
             "description": "Success",
@@ -828,7 +839,18 @@
           "502": {
             "description": "Media service or persistence unavailable"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "all",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ]
       }
     },
     "/api/v1/broadcast/retry": {
@@ -878,6 +900,90 @@
             }
           }
         ]
+      }
+    },
+    "/api/v1/recording/start": {
+      "post": {
+        "summary": "Admin: idempotently activate the recording service; no destination required",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/recording/stop": {
+      "post": {
+        "summary": "Admin: stop the recording service, keeping an active live service",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
       }
     },
     "/api/v1/renderer/state": {
@@ -1019,6 +1125,142 @@
             "renderer": []
           }
         ]
+      }
+    },
+    "/api/v1/settings/recordings": {
+      "get": {
+        "summary": "Admin: current and default recordings folder",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "default_path": {
+                      "type": "string"
+                    },
+                    "is_default": {
+                      "type": "boolean"
+                    },
+                    "editable": {
+                      "type": "boolean"
+                    },
+                    "locked": {
+                      "type": "boolean"
+                    },
+                    "available": {
+                      "type": "boolean"
+                    },
+                    "free_bytes": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "default_path",
+                    "is_default",
+                    "editable",
+                    "locked",
+                    "available"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          }
+        }
+      },
+      "put": {
+        "summary": "Admin: choose the folder for new recordings; null path restores the default",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "default_path": {
+                      "type": "string"
+                    },
+                    "is_default": {
+                      "type": "boolean"
+                    },
+                    "editable": {
+                      "type": "boolean"
+                    },
+                    "locked": {
+                      "type": "boolean"
+                    },
+                    "available": {
+                      "type": "boolean"
+                    },
+                    "free_bytes": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "default_path",
+                    "is_default",
+                    "editable",
+                    "locked",
+                    "available"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          }
+        }
       }
     },
     "/api/v1/recordings": {

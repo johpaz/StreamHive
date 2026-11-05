@@ -153,6 +153,111 @@ impl Default for Program {
         }
     }
 }
+/// Pantallas genéricas que sustituyen al programa: inicio, pausa y fin.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SlateKind {
+    Start,
+    Pause,
+    End,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Slate {
+    pub title: String,
+    pub subtitle: String,
+    /// Duración del temporizador; 0 significa sin temporizador.
+    pub timer_seconds: u32,
+    pub timer_label: String,
+    /// Texto que sustituye al temporizador cuando llega a cero.
+    pub done_label: String,
+    pub background: String,
+    pub background_asset: Option<String>,
+    pub show_logo: bool,
+    pub music_asset: Option<String>,
+    pub music_volume: f64,
+    /// Al llegar a cero: inicio y pausa vuelven al programa; fin termina la sesión.
+    pub auto_on_timer_end: bool,
+    /// Solo inicio: se muestra sola al empezar el directo.
+    pub show_on_go_live: bool,
+}
+impl Default for Slate {
+    fn default() -> Self {
+        Self {
+            title: "Empezamos pronto".into(),
+            subtitle: String::new(),
+            timer_seconds: 0,
+            timer_label: String::new(),
+            done_label: String::new(),
+            background: default_background(),
+            background_asset: None,
+            show_logo: true,
+            music_asset: None,
+            music_volume: 0.5,
+            auto_on_timer_end: false,
+            show_on_go_live: false,
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Slates {
+    pub start: Slate,
+    pub pause: Slate,
+    pub end: Slate,
+}
+impl Default for Slates {
+    fn default() -> Self {
+        Self {
+            start: Slate {
+                title: "Empezamos pronto".into(),
+                timer_seconds: 300,
+                timer_label: "Empezamos en".into(),
+                done_label: "Empezamos enseguida".into(),
+                show_on_go_live: true,
+                ..Slate::default()
+            },
+            pause: Slate {
+                title: "Volvemos enseguida".into(),
+                timer_seconds: 300,
+                timer_label: "Volvemos en".into(),
+                done_label: "Ya casi estamos de vuelta".into(),
+                ..Slate::default()
+            },
+            end: Slate {
+                title: "Gracias por acompañarnos".into(),
+                ..Slate::default()
+            },
+        }
+    }
+}
+impl Slates {
+    pub fn get(&self, kind: SlateKind) -> &Slate {
+        match kind {
+            SlateKind::Start => &self.start,
+            SlateKind::Pause => &self.pause,
+            SlateKind::End => &self.end,
+        }
+    }
+    pub fn get_mut(&mut self, kind: SlateKind) -> &mut Slate {
+        match kind {
+            SlateKind::Start => &mut self.start,
+            SlateKind::Pause => &mut self.pause,
+            SlateKind::End => &mut self.end,
+        }
+    }
+    pub fn uses_asset(&self, asset: &str) -> bool {
+        [&self.start, &self.pause, &self.end].iter().any(|s| {
+            s.background_asset.as_deref() == Some(asset) || s.music_asset.as_deref() == Some(asset)
+        })
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ActiveSlate {
+    pub kind: SlateKind,
+    pub started_at_ms: u64,
+    pub ends_at_ms: Option<u64>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Participant {
     pub id: String,
@@ -186,6 +291,14 @@ pub struct Broadcast {
     pub destination_statuses: BTreeMap<String, String>,
     #[serde(default)]
     pub renderer_revisions: BTreeMap<String, u64>,
+    /// Servicios activos de la sesión. Las sesiones anteriores hacían siempre ambos.
+    #[serde(default = "enabled")]
+    pub live: bool,
+    #[serde(default = "enabled")]
+    pub recording: bool,
+}
+fn enabled() -> bool {
+    true
 }
 impl Broadcast {
     pub fn running(&self) -> bool {
@@ -198,6 +311,12 @@ impl Broadcast {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Recording {
     pub id: String,
+    /// Sesión de salida que la produce; una sesión puede grabar varias veces.
+    #[serde(default)]
+    pub session: String,
+    /// Carpeta elegida al grabar; sin valor está en la predeterminada.
+    #[serde(default)]
+    pub directory: Option<String>,
     pub filename: String,
     pub created: u64,
     pub status: String,
@@ -235,8 +354,76 @@ pub struct Data {
     pub destinations: Vec<StoredDestination>,
     #[serde(default)]
     pub assets: BTreeMap<String, Asset>,
+    /// Carpeta elegida para las grabaciones nuevas; sin valor se usa la predeterminada.
+    #[serde(default)]
+    pub recordings_dir: Option<String>,
+    #[serde(default)]
+    pub slates: Slates,
+    /// Pantalla al aire. Vive fuera del programa: afecta a los dos formatos a la vez,
+    /// las escenas no la capturan y el programa se puede preparar debajo sin que se vea.
+    #[serde(default)]
+    pub active_slate: Option<ActiveSlate>,
+}
+impl Recording {
+    /// Cada grabación sigue en su carpeta aunque luego se elija otra.
+    pub fn path(&self, default: &std::path::Path) -> std::path::PathBuf {
+        self.directory
+            .as_deref()
+            .map_or(default, std::path::Path::new)
+            .join(&self.filename)
+    }
+    pub fn belongs_to(&self, broadcast: &str) -> bool {
+        let portrait = OutputFormat::Portrait.session_id(broadcast);
+        [self.id.as_str(), self.session.as_str()]
+            .iter()
+            .any(|x| *x == broadcast || *x == portrait)
+    }
 }
 impl Data {
+    pub fn validate_slate(&self, slate: &Slate) -> Result<(), &'static str> {
+        let line = |text: &str| text.chars().count() <= 60 && !text.chars().any(char::is_control);
+        if slate.title.trim().is_empty() {
+            return Err("La pantalla necesita un título");
+        }
+        if ![
+            &slate.title,
+            &slate.subtitle,
+            &slate.timer_label,
+            &slate.done_label,
+        ]
+        .iter()
+        .all(|text| line(text))
+        {
+            return Err("Los textos admiten una línea de hasta 60 caracteres");
+        }
+        if slate.timer_seconds > 21_600 {
+            return Err("El temporizador admite hasta 6 horas");
+        }
+        if slate.background.len() != 7
+            || !slate.background.starts_with('#')
+            || !slate.background[1..].bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("Color de fondo inválido");
+        }
+        if slate
+            .background_asset
+            .as_ref()
+            .is_some_and(|id| !self.assets.get(id).is_some_and(|a| a.kind == "image"))
+        {
+            return Err("Selecciona una imagen existente para el fondo");
+        }
+        if slate
+            .music_asset
+            .as_ref()
+            .is_some_and(|id| !self.assets.get(id).is_some_and(|a| a.kind == "audio"))
+        {
+            return Err("Selecciona un audio existente para la música");
+        }
+        if !slate.music_volume.is_finite() || !(0.0..=1.0).contains(&slate.music_volume) {
+            return Err("Volumen de música inválido");
+        }
+        Ok(())
+    }
     /// Mueve el destino único de versiones anteriores a la lista. Devuelve si hubo cambios.
     pub fn migrate_legacy_destination(&mut self, new_id: String) -> bool {
         let Some(sealed) = self.destination.take() else {
@@ -341,6 +528,13 @@ impl Data {
             .is_some_and(|id| !self.assets.contains_key(id))
         {
             return Err("Archivo inexistente");
+        }
+        if p.media_asset
+            .as_ref()
+            .and_then(|id| self.assets.get(id))
+            .is_some_and(|a| a.kind == "audio")
+        {
+            return Err("El audio solo se puede usar como música de una pantalla");
         }
         if !["bottom_right", "bottom_left", "top_right", "top_left"]
             .contains(&p.pip_position.as_str())

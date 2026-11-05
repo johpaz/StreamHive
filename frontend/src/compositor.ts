@@ -166,7 +166,7 @@ class AudioMixer {
         if (!src.getAudioTracks().length || this.seen.has(src)) return;
         this.seen.add(src);
         this.ctx.createMediaStreamSource(src).connect(this.dest);
-      } else if (media.tagName === "VIDEO" && media.currentSrc) {
+      } else if (media.currentSrc) {
         if (this.seen.has(media)) return;
         this.seen.add(media);
         try {
@@ -184,7 +184,7 @@ class AudioMixer {
 }
 
 /** Reloj estable: un Worker no se frena cuando la ventana está oculta. */
-function ticker(ms: number, fn: () => void): () => void {
+export function ticker(ms: number, fn: () => void): () => void {
   try {
     const url = URL.createObjectURL(
       new Blob([`setInterval(()=>postMessage(0),${ms})`], {
@@ -272,7 +272,8 @@ export function startProgramCapture(o: CaptureOptions): () => void {
     stats.avgMs += (ms - stats.avgMs) * 0.05;
     stats.maxMs = Math.max(stats.maxMs, ms);
     if (ms > budget) stats.slow++;
-    if (++frames % fps === 0) mixer.scan(o.stage);
+    // Cada 100 ms: un audio sin enganchar sonaría por los altavoces del equipo.
+    if (++frames % 3 === 0) mixer.scan(o.stage);
   });
   mixer.scan(o.stage);
   recorder.ondataavailable = (e) => {

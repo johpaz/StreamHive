@@ -1,13 +1,15 @@
-//! Motor de salida: compone, graba (MP4) y emite (RTMP) el programa.
+//! Motor de salida: compone el programa y ofrece dos servicios independientes,
+//! emisión (RTMP) y grabación (MP4), que se activan y detienen por separado.
 //!
 //! Todos los motores devuelven información con la forma de LiveKit `EgressInfo`
 //! (`egress_id`, `status`, `stream_results`, `file_results`) para que la
 //! reconciliación del backend sea idéntica sea cual sea el motor.
 //! Egress y FFmpeg comparten estados de salida; FFmpeg publica cada destino por separado.
+mod recorder;
 mod relay;
 use crate::{livekit::LiveKit, model::ROOM};
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Instant};
+use std::{collections::HashMap, process::Stdio, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdin, Command},
@@ -21,12 +23,11 @@ pub enum Engine {
 }
 
 /// Motor de escritorio: recibe por stdin el WebM (vídeo+audio) que produce el
-/// compositor del renderer y, con un único encode, escribe el MP4 y, si hay
-/// destinos, reparte la codificación a publicadores RTMP independientes de la grabación.
+/// compositor del renderer y lo codifica una vez. Los publicadores RTMP y las grabaciones
+/// se suscriben a esa codificación y pueden entrar o salir sin interrumpirla.
 #[derive(Clone)]
 pub struct Ffmpeg {
     pub bin: String,
-    pub recordings: PathBuf,
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     encoder: Arc<tokio::sync::OnceCell<String>>,
     progress: Arc<std::sync::Mutex<Option<Value>>>,
@@ -113,6 +114,9 @@ struct Session {
     started: Instant,
     stopping: bool,
     relays: Vec<relay::Relay>,
+    recorders: Vec<recorder::Recorder>,
+    /// Punto de suscripción; no mantiene abierto el canal cuando el encoder termina.
+    tap: broadcast::Receiver<Arc<[u8]>>,
 }
 fn parse_progress(key: &str, value: &str) -> Option<Value> {
     Some(match key {
@@ -130,26 +134,15 @@ fn parse_progress(key: &str, value: &str) -> Option<Value> {
     })
 }
 impl Ffmpeg {
-    pub fn new(bin: impl Into<String>, recordings: PathBuf) -> Self {
+    pub fn new(bin: impl Into<String>) -> Self {
         Self {
             bin: bin.into(),
-            recordings,
             sessions: Default::default(),
             encoder: Default::default(),
             progress: Default::default(),
         }
     }
     fn args(&self, p: &StartParams<'_>, encoder: String) -> Vec<String> {
-        let file = self.recordings.join(format!("{}.mp4", p.broadcast_id));
-        let mut tee = format!(
-            "[f=mp4:movflags=+frag_keyframe+empty_moov]{}",
-            file.display()
-        );
-        // El transporte local se reparte a publicadores independientes sin recodificar.
-        // Ninguna URL ni clave forma parte de la sintaxis tee.
-        if !p.destinations.is_empty() {
-            tee += "|[f=mpegts:mpegts_flags=+resend_headers]pipe:1";
-        }
         let mut a: Vec<String> = [
             "-hide_banner",
             "-nostats",
@@ -188,13 +181,7 @@ impl Ffmpeg {
             "-r".into(),
             FPS.to_string(),
         ]);
-        // MP4 requires codec extradata even when sharing the encoder with MPEG-TS.
-        a.extend([
-            "-flags".into(),
-            "+global_header".into(),
-            "-c:v".into(),
-            encoder,
-        ]);
+        a.extend(["-c:v".into(), encoder]);
         if a.last().is_some_and(|e| e == "libx264") {
             a.extend([
                 "-preset".into(),
@@ -233,9 +220,13 @@ impl Ffmpeg {
             "0:v".into(),
             "-map".into(),
             "0:a".into(),
+            // Sin cabecera global: los parámetros H.264 viajan en cada fotograma clave,
+            // así un servicio puede unirse en cualquier momento. Ninguna URL ni clave va aquí.
             "-f".into(),
-            "tee".into(),
-            tee,
+            "mpegts".into(),
+            "-mpegts_flags".into(),
+            "+resend_headers".into(),
+            "pipe:1".into(),
         ]);
         a
     }
@@ -273,11 +264,16 @@ impl Ffmpeg {
                 }
             });
         }
-        let (packets, _) = broadcast::channel::<Arc<[u8]>>(128);
+        let (packets, tap) = broadcast::channel::<Arc<[u8]>>(128);
         let relays = p
             .destinations
             .iter()
             .map(|url| relay::Relay::spawn(self.bin.clone(), url.clone(), packets.subscribe()))
+            .collect();
+        let recorders = p
+            .record
+            .map(|target| self.recorder(target, tap.resubscribe()))
+            .into_iter()
             .collect();
         let mut out = child.stdout.take().unwrap();
         tokio::spawn(async move {
@@ -297,9 +293,49 @@ impl Ffmpeg {
                 started: Instant::now(),
                 stopping: false,
                 relays,
+                recorders,
+                tap,
             },
         );
         Ok(json!({"egress_id":p.broadcast_id,"status":"EGRESS_ACTIVE"}))
+    }
+    fn recorder(
+        &self,
+        target: RecordingTarget<'_>,
+        input: broadcast::Receiver<Arc<[u8]>>,
+    ) -> recorder::Recorder {
+        recorder::Recorder::spawn(
+            self.bin.clone(),
+            target.id.to_owned(),
+            target.dir.join(format!("{}.mp4", target.id)),
+            input,
+        )
+    }
+    /// Sustituye los publicadores RTMP. Con una lista vacía deja de emitir; el encoder sigue.
+    async fn set_destinations(&self, id: &str, urls: &[String]) -> anyhow::Result<()> {
+        let mut sessions = self.sessions.lock().await;
+        let s = sessions
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("No hay ninguna sesión activa"))?;
+        s.relays = urls
+            .iter()
+            .map(|url| relay::Relay::spawn(self.bin.clone(), url.clone(), s.tap.resubscribe()))
+            .collect();
+        Ok(())
+    }
+    async fn start_recording(&self, id: &str, target: RecordingTarget<'_>) -> anyhow::Result<()> {
+        let mut sessions = self.sessions.lock().await;
+        let s = sessions
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("No hay ninguna sesión activa"))?;
+        let recorder = self.recorder(target, s.tap.resubscribe());
+        s.recorders.push(recorder);
+        Ok(())
+    }
+    async fn stop_recording(&self, id: &str) {
+        if let Some(s) = self.sessions.lock().await.get(id) {
+            s.recorders.iter().for_each(recorder::Recorder::stop);
+        }
     }
     /// Entrega un fragmento WebM al encoder.
     pub async fn feed(&self, id: &str, chunk: &[u8]) -> anyhow::Result<()> {
@@ -324,7 +360,7 @@ impl Ffmpeg {
         if let Some(s) = sessions.get_mut(id) {
             s.stopping = true;
             if let Some(mut stdin) = s.stdin.take() {
-                let _ = stdin.shutdown().await; // EOF: ffmpeg cierra el MP4 limpiamente
+                let _ = stdin.shutdown().await; // EOF: el encoder termina y las grabaciones se cierran
             }
         }
         Ok(())
@@ -337,10 +373,14 @@ impl Ffmpeg {
             .iter()
             .map(|r| json!({"url":r.url,"status":*r.state.lock().unwrap()}))
             .collect();
+        let recordings: Vec<_> = s.recorders.iter().map(recorder::Recorder::info).collect();
+        let closing = s.recorders.iter().any(recorder::Recorder::active);
         let mut info = match s.child.try_wait() {
             Ok(None) => {
                 json!({"egress_id":id,"status":if s.stopping {"EGRESS_ENDING"} else {"EGRESS_ACTIVE"}})
             }
+            // La sesión no termina hasta que todas sus grabaciones están cerradas.
+            Ok(Some(_)) if closing => json!({"egress_id":id,"status":"EGRESS_ENDING"}),
             Ok(Some(st)) if st.success() => {
                 let ns = s.started.elapsed().as_nanos().to_string();
                 json!({"egress_id":id,"status":"EGRESS_COMPLETE","file_results":[{"duration":ns}]})
@@ -348,14 +388,24 @@ impl Ffmpeg {
             _ => json!({"egress_id":id,"status":"EGRESS_FAILED"}),
         };
         info["stream_results"] = json!(streams);
+        info["recording_results"] = json!(recordings);
         Some(info)
     }
+}
+
+/// Grabación que se va a producir y carpeta donde se escribe.
+#[derive(Clone, Copy)]
+pub struct RecordingTarget<'a> {
+    pub id: &'a str,
+    pub dir: &'a std::path::Path,
 }
 
 pub struct StartParams<'a> {
     pub broadcast_id: &'a str,
     pub render_url: &'a str,
     pub destinations: &'a [String],
+    /// La grabación, si este servicio arranca con la sesión.
+    pub record: Option<RecordingTarget<'a>>,
     pub video_bitrate: u32,
     pub audio_bitrate: u32,
     pub format: crate::model::OutputFormat,
@@ -372,16 +422,21 @@ impl Engine {
     pub fn is_local(&self) -> bool {
         matches!(self, Engine::Ffmpeg(_))
     }
-    /// Inicia grabación + emisión. Devuelve la info del motor (con `egress_id`).
+    /// Los servicios solo pueden cambiar con la sesión en marcha en el motor local:
+    /// Egress fija sus salidas de archivo al iniciar.
+    pub fn independent_services(&self) -> bool {
+        self.is_local()
+    }
+    /// Inicia una sesión con los servicios pedidos. Devuelve la info del motor (con `egress_id`).
     pub async fn start(&self, p: StartParams<'_>) -> anyhow::Result<Value> {
         match self {
             Engine::Ffmpeg(f) => f.start(p).await,
             Engine::Egress(lk) => {
-                let mut request = crate::livekit::egress_request(
-                    &format!("/recordings/{}.mp4", p.broadcast_id),
-                    p.render_url,
-                    p.destinations,
-                );
+                let path = p
+                    .record
+                    .map(|_| format!("/recordings/{}.mp4", p.broadcast_id));
+                let mut request =
+                    crate::livekit::egress_request(path.as_deref(), p.render_url, p.destinations);
                 request["advanced"]["video_bitrate"] = json!(p.video_bitrate);
                 request["advanced"]["audio_bitrate"] = json!(p.audio_bitrate);
                 let (width, height) = p.format.dimensions();
@@ -410,6 +465,31 @@ impl Engine {
         }
     }
 
+    pub async fn set_destinations(&self, id: &str, urls: &[String]) -> anyhow::Result<()> {
+        match self {
+            Engine::Ffmpeg(f) => f.set_destinations(id, urls).await,
+            Engine::Egress(_) => anyhow::bail!("Egress fija sus salidas al iniciar la sesión"),
+        }
+    }
+    pub async fn start_recording(
+        &self,
+        id: &str,
+        target: RecordingTarget<'_>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Engine::Ffmpeg(f) => f.start_recording(id, target).await,
+            Engine::Egress(_) => anyhow::bail!("Egress fija sus salidas al iniciar la sesión"),
+        }
+    }
+    pub async fn stop_recording(&self, id: &str) -> anyhow::Result<()> {
+        match self {
+            Engine::Ffmpeg(f) => {
+                f.stop_recording(id).await;
+                Ok(())
+            }
+            Engine::Egress(_) => anyhow::bail!("Egress fija sus salidas al iniciar la sesión"),
+        }
+    }
     /// Reintenta/añade la salida RTMP de una emisión en curso.
     pub async fn add_stream_output(&self, id: &str, urls: &[String]) -> anyhow::Result<()> {
         match self {
@@ -457,6 +537,7 @@ impl Engine {
                     )
                     .await?;
                 let suffix = format!("/{broadcast_id}.mp4");
+                let session = format!("session={broadcast_id}");
                 Ok(response["items"]
                     .as_array()
                     .into_iter()
@@ -465,19 +546,23 @@ impl Engine {
                         Some(id) => x["egress_id"].as_str() == Some(id),
                         None => {
                             x["room_name"] == ROOM
-                                && (x["egress"]["outputs"].as_array().into_iter().flatten().any(
-                                    |o| {
-                                        o["file"]["filepath"]
-                                            .as_str()
-                                            .is_some_and(|p| p.ends_with(&suffix))
-                                    },
-                                ) || x["file_results"].as_array().into_iter().flatten().any(
-                                    |f| {
-                                        f["filename"]
-                                            .as_str()
-                                            .is_some_and(|p| p.ends_with(&suffix[1..]))
-                                    },
-                                ))
+                                && (x["egress"]["template"]["custom_base_url"]
+                                    .as_str()
+                                    .is_some_and(|u| u.ends_with(&session))
+                                    || x["egress"]["outputs"].as_array().into_iter().flatten().any(
+                                        |o| {
+                                            o["file"]["filepath"]
+                                                .as_str()
+                                                .is_some_and(|p| p.ends_with(&suffix))
+                                        },
+                                    )
+                                    || x["file_results"].as_array().into_iter().flatten().any(
+                                        |f| {
+                                            f["filename"]
+                                                .as_str()
+                                                .is_some_and(|p| p.ends_with(&suffix[1..]))
+                                        },
+                                    ))
                         }
                     })
                     .cloned())
@@ -553,31 +638,29 @@ mod tests {
         );
     }
     #[test]
-    fn shared_transport_has_no_secrets_and_portrait_has_its_own_dimensions() {
-        let f = Ffmpeg::new("ffmpeg", std::env::temp_dir());
+    fn shared_transport_has_no_secrets_or_files_and_portrait_has_its_own_dimensions() {
+        let f = Ffmpeg::new("ffmpeg");
         let urls = vec!["rtmps://a/live/secret|with:syntax".into()];
         let p = StartParams {
             broadcast_id: "b",
             render_url: "",
             destinations: &urls,
+            record: Some(RecordingTarget {
+                id: "b",
+                dir: std::path::Path::new("/recordings"),
+            }),
             video_bitrate: 6000,
             audio_bitrate: 128,
             format: crate::model::OutputFormat::Portrait,
         };
         let args = f.args(&p, "libx264".into());
         assert!(args.iter().any(|a| a.contains("scale=1080:1920")));
-        let tee = args.last().unwrap();
-        assert!(tee.contains("f=mpegts"));
-        assert!(!tee.contains("secret"));
-        let none = StartParams {
-            destinations: &[],
-            ..p
-        };
+        assert_eq!(args.last().unwrap(), "pipe:1");
+        assert!(args.iter().any(|a| a == "mpegts"));
         assert!(
-            !f.args(&none, "libx264".into())
-                .last()
-                .unwrap()
-                .contains("mpegts")
+            !args
+                .iter()
+                .any(|a| a.contains("secret") || a.contains(".mp4"))
         );
     }
     #[test]
@@ -599,12 +682,16 @@ mod tests {
         };
         let dir = std::env::temp_dir().join(format!("sh-ffmpeg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let engine = Engine::Ffmpeg(Ffmpeg::new("ffmpeg", dir.clone()));
+        let engine = Engine::Ffmpeg(Ffmpeg::new("ffmpeg"));
         let info = engine
             .start(StartParams {
                 broadcast_id: "b1",
                 render_url: "",
                 destinations: &["rtmp://127.0.0.1:1/live/test".into()],
+                record: Some(RecordingTarget {
+                    id: "b1",
+                    dir: &dir,
+                }),
                 video_bitrate: 800,
                 audio_bitrate: 64,
                 format: Default::default(),
@@ -644,6 +731,137 @@ mod tests {
         if let Ok(out) = probe {
             assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "30/1");
         }
+        std::fs::remove_dir_all(dir).ok();
+    }
+    async fn wait_for_end(engine: &Engine, id: &str) -> Value {
+        let mut status = Value::Null;
+        for _ in 0..150 {
+            status = engine.find(Some(id), id).await.unwrap().unwrap();
+            if status["status"] == "EGRESS_COMPLETE" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        status
+    }
+    #[tokio::test]
+    async fn streaming_alone_never_writes_a_file() {
+        let Some(sample) = test_webm_sample().await else {
+            eprintln!("ffmpeg con libvpx/libopus no disponible; prueba omitida");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("sh-live-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = Engine::Ffmpeg(Ffmpeg::new("ffmpeg"));
+        engine
+            .start(StartParams {
+                broadcast_id: "s",
+                render_url: "",
+                destinations: &["rtmp://127.0.0.1:1/live/test".into()],
+                record: None,
+                video_bitrate: 800,
+                audio_bitrate: 64,
+                format: Default::default(),
+            })
+            .await
+            .unwrap();
+        let Engine::Ffmpeg(f) = &engine else {
+            unreachable!()
+        };
+        f.feed("s", &sample).await.unwrap();
+        engine.stop("s").await.unwrap();
+        assert_eq!(
+            wait_for_end(&engine, "s").await["status"],
+            "EGRESS_COMPLETE"
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+    #[tokio::test]
+    async fn recording_starts_and_stops_while_the_session_keeps_running() {
+        let Some(sample) = test_webm_sample().await else {
+            eprintln!("ffmpeg con libvpx/libopus no disponible; prueba omitida");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("sh-independent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = Engine::Ffmpeg(Ffmpeg::new("ffmpeg"));
+        engine
+            .start(StartParams {
+                broadcast_id: "s",
+                render_url: "",
+                destinations: &[],
+                record: None,
+                video_bitrate: 800,
+                audio_bitrate: 64,
+                format: Default::default(),
+            })
+            .await
+            .unwrap();
+        engine
+            .start_recording(
+                "s",
+                RecordingTarget {
+                    id: "first",
+                    dir: &dir,
+                },
+            )
+            .await
+            .unwrap();
+        let Engine::Ffmpeg(f) = &engine else {
+            unreachable!()
+        };
+        f.feed("s", &sample).await.unwrap();
+        // Una grabación detenida se cierra sola; la sesión sigue activa.
+        for _ in 0..30 {
+            if std::fs::metadata(dir.join("first.mp4")).is_ok_and(|m| m.len() > 1000) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        engine.stop_recording("s").await.unwrap();
+        let mut info = Value::Null;
+        for _ in 0..100 {
+            info = engine.find(Some("s"), "s").await.unwrap().unwrap();
+            if info["recording_results"][0]["status"] != "live" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(info["recording_results"][0]["status"], "complete");
+        assert_eq!(info["status"], "EGRESS_ACTIVE");
+        let probe = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(dir.join("first.mp4"))
+            .output()
+            .unwrap();
+        let codecs = String::from_utf8_lossy(&probe.stdout);
+        assert!(
+            codecs.contains("h264") && codecs.contains("aac"),
+            "{codecs}"
+        );
+        // Una grabación activa impide dar la sesión por terminada: su archivo debe cerrarse.
+        engine
+            .start_recording(
+                "s",
+                RecordingTarget {
+                    id: "second",
+                    dir: &dir,
+                },
+            )
+            .await
+            .unwrap();
+        engine.stop("s").await.unwrap();
+        let end = wait_for_end(&engine, "s").await;
+        assert_eq!(end["status"], "EGRESS_COMPLETE");
+        assert!(dir.join("second.mp4").exists());
         std::fs::remove_dir_all(dir).ok();
     }
 }

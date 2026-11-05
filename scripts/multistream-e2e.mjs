@@ -42,17 +42,17 @@ try {
   // Guarda composiciones independientes y comprueba que recuperar una escena no pisa la otra.
   await page.getByLabel("Nombre de la escena").fill("Entrevista horizontal");
   await page.getByRole("button", { name: "Guardar escena actual" }).click();
-  await page.getByRole("button", { name: "Entrevista horizontal", exact: true }).waitFor();
+  await page.getByRole("list", { name: "Escenas guardadas" }).getByText("Entrevista horizontal", { exact: true }).waitFor();
   console.log("escena horizontal guardada; cambiando formato");
   await page.getByLabel("Composición", { exact: true }).selectOption("portrait");
   await page.getByRole("button", { name: "Copiar desde 16:9", exact: true }).click();
   await page.getByLabel("Nombre de la escena").fill("Entrevista vertical");
   await page.getByRole("button", { name: "Guardar escena actual" }).click();
-  await page.getByRole("button", { name: "Entrevista vertical", exact: true }).waitFor();
+  await page.getByRole("list", { name: "Escenas guardadas" }).getByText("Entrevista vertical", { exact: true }).waitFor();
   assert(await page.locator(".stage.format-portrait").count() === 1, "sin vista vertical");
 
   await page.getByLabel("Composición", { exact: true }).selectOption("landscape");
-  await page.getByRole("button", { name: "Entrevista horizontal", exact: true }).click({ force: true });
+  await page.getByRole("list", { name: "Escenas guardadas" }).locator("li").filter({ hasText: "Entrevista horizontal" }).getByText("En el programa").waitFor();
 
   console.log("escenas de ambos formatos verificadas; configurando destinos");
   // --- Añadir destinos desde la interfaz de Configuración
@@ -93,7 +93,7 @@ try {
 
   // --- Emitir
   const post = (path, data) => page.request.fetch(`${origin}${path}`, { method: "POST", headers: { Origin: origin }, data });
-  const start = await post("/api/v1/broadcast/start", {});
+  const start = await post("/api/v1/broadcast/start?record=true", {});
   assert(start.ok(), "start: " + (await start.text()));
   await sleep(secs * 1000);
   const studio = await (await page.request.get(`${origin}/api/v1/studio`)).json();
@@ -124,7 +124,7 @@ try {
   assert(recovered.broadcast.id === studio.broadcast.id, "se reinició la emisión al recuperar una salida");
   assert(recovered.destinations.find((d) => d.name === "Kick")?.status === "live", "la horizontal cayó con la vertical");
   await sleep(3000);
-  assert((await post("/api/v1/broadcast/stop", {})).ok(), "stop");
+  assert((await post("/api/v1/broadcast/stop?all=true", {})).ok(), "stop");
   for (let i = 0; i < 100; i++) { const b = (await (await page.request.get(`${origin}/api/v1/studio`)).json()).broadcast; if (/complete|error/.test(b?.status)) break; await sleep(250); }
   await sleep(800);
   const probe = (f) => JSON.parse(execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height", "-of", "json", f]).toString()).streams;

@@ -205,6 +205,21 @@ if (primary) app.whenReady().then(async () => {
     openRenderer(rel + (process.env.STREAMHIVE_RENDER_PARAMS || ""));
   });
   ipcMain.handle("renderer:close", () => { for (const window of rendererWindows.values()) window.close(); });
+  ipcMain.handle("folder:choose", async (e, current) => {
+    if (origin(e.senderFrame.url) !== origin(base)) return null;
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: "Carpeta de grabaciones",
+      defaultPath: typeof current === "string" ? current : undefined,
+      properties: ["openDirectory", "createDirectory"],
+    });
+    return canceled ? null : filePaths[0] ?? null;
+  });
+  // openPath ejecutaría un archivo: solo se aceptan carpetas.
+  ipcMain.handle("folder:open", (e, folder) => {
+    if (origin(e.senderFrame.url) !== origin(base) || typeof folder !== "string" || !path.isAbsolute(folder)) return;
+    if (!fs.statSync(folder, { throwIfNoEntry: false })?.isDirectory()) throw new Error("La carpeta no está disponible");
+    return shell.openPath(folder);
+  });
 
   let ctx;
   try { ctx = await start(); } catch (e) { dialog.showErrorBox("StreamHive no pudo iniciar", String(e.message || e)); return app.quit(); }

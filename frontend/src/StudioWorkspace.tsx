@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { participants, publication, allowedTrack, type useRoom } from "./media";
 import { Stage, TrackView } from "./Stage";
@@ -12,6 +12,8 @@ import {
   type CapturePreferences,
 } from "./devices";
 import { Icon, LayoutThumb } from "./ui";
+import { formatCountdown, shownSlate, slateNames } from "./slate";
+import { useStoredFlag } from "./useFocusMode";
 import { uploadAsset } from "./uploads";
 import { assetUrl, playbackTime, playbackFinished } from "./composition";
 import {
@@ -24,6 +26,7 @@ import {
   type Program,
   type Person,
   type ContentMode,
+  type SlateKind,
 } from "./types";
 type Action = (
   action: () => Promise<unknown>,
@@ -41,7 +44,13 @@ interface Props {
   onConnect: () => Promise<void>;
   onPreferences: (preferences: CapturePreferences) => void;
   onSettings: () => void;
+  focus?: boolean;
+  onFocus?: (focus: boolean) => void;
+  onInvite?: () => void;
+  /** Escenas compactas del panel de foco. */
+  scenes?: React.ReactNode;
 }
+const slateKinds: SlateKind[] = ["start", "pause", "end"];
 const contentLabels = {
   side: "Contenido y cámaras",
   pip: "Cámara flotante",
@@ -67,6 +76,10 @@ export function StudioWorkspace({
   onConnect,
   onPreferences,
   onSettings,
+  focus = false,
+  onFocus,
+  onInvite,
+  scenes,
 }: Props) {
   const admin = me.role === "admin",
     p = studio.program,
@@ -77,6 +90,16 @@ export function StudioWorkspace({
       broadcast.status,
     ),
   );
+  // Emisión y grabación son servicios independientes de la misma sesión.
+  const live = running && broadcast?.live !== false,
+    recording = running && broadcast?.recording !== false,
+    ending = broadcast?.status === "ending",
+    independent = studio.independent_services !== false;
+  const [recordWithLive, setRecordWithLive] = useState(false);
+  const [panelTab, setPanelTab] = useState<"scenes" | "sources" | "settings">("scenes");
+  const [panelClosed, setPanelClosed] = useStoredFlag("streamhive.focus-panel-closed");
+  const activeSlate = studio.active_slate ?? null;
+  const shown = shownSlate(studio.slates, activeSlate);
   const admitted =
     admin ||
     studio.participants.find((x) => x.id === me.id)?.status === "admitted";
@@ -98,10 +121,10 @@ export function StudioWorkspace({
   const stageRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    if (!p.media_asset) return;
-    const timer = setInterval(() => setClock(Date.now()), 250);
+    if (!p.media_asset && !focus) return;
+    const timer = setInterval(() => setClock(Date.now()), p.media_asset ? 250 : 1000);
     return () => clearInterval(timer);
-  }, [p.media_asset]);
+  }, [p.media_asset, focus]);
   useEffect(() => {
     setDuration(0);
     setMediaError("");
@@ -268,89 +291,13 @@ export function StudioWorkspace({
         <DeviceSetup />
       </section>
     );
-  return (
-    <div className="studio-workspace">
-      <div className="workspace-heading">
-        <div>
-          <span className="section-kicker">ESTUDIO PERSONAL</span>
-          <h2>
-            Mi estudio <span className="pill">{format === "portrait" ? "9:16" : "16:9"} · 1080p · 30 fps</span>
-          </h2>
-        </div>
-        <div className="workspace-heading-right">
-          {admin && <ResourceMonitor />}
-          <span
-            className={`broadcast-state ${broadcast?.status === "live" ? "is-live" : ""}`}
-          >
-            <i />
-            {broadcast ? statusLabels[broadcast.status] : "Preparando"}
-          </span>
-          <span className="session-meta">
-            <Icon name="people" size={15} />
-            {cameraPeople.length}/6
-          </span>
-        </div>
-      </div>
-      <div className={`studio-grid ${admin ? "" : "guest-workspace"}`}>
-        <section className="workspace-main">
-          <div className="studio-preview" ref={stageRef}>
-            <div className="preview-title">
-              <span>
-                <Icon name="eye" size={14} /> VISTA DEL PROGRAMA
-              </span>
-              <div>
-                {content ? (
-                  <span className="preview-source-name">
-                    {asset?.name ||
-                      `Pantalla de ${names[p.screen || ""] || "invitado"}`}
-                  </span>
-                ) : (
-                  <span>Cámaras · {p.identities.length} en programa</span>
-                )}
-                <button
-                  className="quiet-icon"
-                  aria-label="Ampliar vista previa"
-                  title="Ampliar vista previa"
-                  onClick={() => void stageRef.current?.requestFullscreen()}
-                >
-                  <Icon name="maximize" size={15} />
-                </button>
-              </div>
-            </div>
-            <Stage
-              format={format}
-              program={p}
-              room={media.room}
-              names={names}
-              revision={media.revision}
-              assets={assets}
-              clockOffset={studio.clock_offset || 0}
-              onMediaInfo={mediaInfo}
-              previewAudio={previewAudio}
-            />
-            <div className="program-status">
-              <span>
-                <i className={running ? "live-dot" : ""} />
-                {running
-                  ? "Programa en emisión"
-                  : "La emisión aún no ha comenzado"}
-              </span>
-              {!p.microphones_enabled ? (
-                <span className="audio-off">
-                  <Icon name="mic" size={12} /> Micrófonos fuera del programa
-                </span>
-              ) : (
-                <span>
-                  <Icon name="mic" size={12} />
-                  {p.identities.length}{" "}
-                  {p.identities.length === 1
-                    ? "voz seleccionada"
-                    : "voces seleccionadas"}
-                </span>
-              )}
-            </div>
-          </div>
-          {admin && (
+  const usedBySlate = (id: string) =>
+    slateKinds.some(
+      (kind) =>
+        studio.slates?.[kind].background_asset === id ||
+        studio.slates?.[kind].music_asset === id,
+    );
+  const compositionBar = admin && (
             <div className="composition-bar">
               <span>Composición</span>
               <div role="group" aria-label="Composición del programa">
@@ -387,253 +334,8 @@ export function StudioWorkspace({
                 ))}
               </div>
             </div>
-          )}
-          {content && admin && (
-            <div className="content-toolbar">
-              <div>
-                <Icon
-                  name={
-                    asset?.kind === "video"
-                      ? "film"
-                      : asset
-                        ? "image"
-                        : "monitor"
-                  }
-                />
-                <span title={asset?.name}>
-                  {asset?.name ||
-                    `Pantalla de ${names[p.screen || ""] || "invitado"}`}
-                </span>
-                <span className="pill">Sin recortes</span>
-              </div>
-              <button
-                className="text-button"
-                disabled={pending}
-                onClick={clearContent}
-              >
-                <Icon name="close" size={14} /> Retirar del programa
-              </button>
-            </div>
-          )}
-          {asset?.kind === "video" && content && admin && (
-            <div className="clip-controls">
-              <button
-                className="clip-play"
-                aria-label={
-                  p.playback.playing && !finished
-                    ? "Pausar video"
-                    : "Reproducir video"
-                }
-                disabled={pending || Boolean(mediaError)}
-                onClick={() =>
-                  setPlayback({
-                    playing: !p.playback.playing || finished,
-                    position:
-                      selectedPosition >= duration - 0.1 ? 0 : selectedPosition,
-                    started_at_ms: null,
-                  })
-                }
-              >
-                <Icon
-                  name={p.playback.playing && !finished ? "pause" : "play"}
-                  size={17}
-                />
-              </button>
-              <button
-                className="quiet-icon"
-                aria-label="Reiniciar video"
-                disabled={pending}
-                onClick={() =>
-                  setPlayback({
-                    position: 0,
-                    playing: true,
-                    started_at_ms: null,
-                  })
-                }
-              >
-                <Icon name="refresh" size={15} />
-              </button>
-              <span className="clip-time">
-                {formatTime(scrub ?? selectedPosition)} / {formatTime(duration)}
-              </span>
-              <input
-                aria-label="Posición del video"
-                type="range"
-                min={0}
-                max={duration || 1}
-                step={0.1}
-                value={scrub ?? Math.min(selectedPosition, duration || 1)}
-                onChange={(e) => setScrub(Number(e.target.value))}
-                onPointerUp={() => {
-                  if (scrub !== null) {
-                    void setPlayback({ position: scrub, started_at_ms: null });
-                    setScrub(null);
-                  }
-                }}
-                onKeyUp={() => {
-                  if (scrub !== null) {
-                    void setPlayback({ position: scrub, started_at_ms: null });
-                    setScrub(null);
-                  }
-                }}
-              />
-              <button
-                className={`quiet-icon ${previewAudio ? "selected" : ""}`}
-                aria-label={
-                  previewAudio
-                    ? "Dejar de escuchar archivo"
-                    : "Escuchar archivo en este equipo"
-                }
-                title="Escuchar archivo en este equipo"
-                onClick={() => setPreviewAudio(!previewAudio)}
-              >
-                <Icon name="volume" size={16} />
-              </button>
-              <label className="clip-loop">
-                <input
-                  type="checkbox"
-                  checked={p.playback.looped}
-                  onChange={(e) => setPlayback({ looped: e.target.checked })}
-                />
-                Repetir
-              </label>
-            </div>
-          )}
-          {mediaError && <div className="alert error">{mediaError}</div>}
-          {hint && (
-            <div className="studio-hint">
-              <Icon name="monitor" size={16} />
-              <span>{hint}</span>
-              <button
-                className="quiet-icon"
-                aria-label="Cerrar ayuda"
-                onClick={() => setHint("")}
-              >
-                <Icon name="close" size={14} />
-              </button>
-            </div>
-          )}
-          <div className="studio-controls">
-            <button
-              className="control-button"
-              onClick={() => setEffectsOpen(true)}
-            >
-              <Icon name="camera" />
-              <span>Efectos de cámara</span>
-            </button>
-            <button
-              className="control-button"
-              onClick={() => setQualityOpen(true)}
-            >
-              <Icon name="camera" />
-              <span>Calidad de cámara</span>
-            </button>
-            {!media.room ? (
-              <>
-                <button
-                  className="button primary"
-                  disabled={media.busy || pending}
-                  onClick={onConnect}
-                >
-                  <Icon name="camera" />
-                  {media.busy
-                    ? "Conectando a la sala…"
-                    : "Conectar cámara y audio"}
-                </button>
-                <button
-                  className="button"
-                  onClick={() => setDeviceOpen(!deviceOpen)}
-                >
-                  <Icon name="settings" />
-                  Probar dispositivos
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  className={`control-button ${media.room.localParticipant.isMicrophoneEnabled ? "" : "is-off"}`}
-                  title="Control de tu micrófono en la sala"
-                  onClick={() =>
-                    onAction(() =>
-                      media.room!.localParticipant.setMicrophoneEnabled(
-                        !media.room!.localParticipant.isMicrophoneEnabled,
-                      ),
-                    )
-                  }
-                >
-                  <Icon name="mic" />
-                  <span>
-                    {media.room.localParticipant.isMicrophoneEnabled
-                      ? "Silenciar"
-                      : "Activar micrófono"}
-                  </span>
-                </button>
-                <button
-                  className={`control-button ${media.room.localParticipant.isCameraEnabled ? "" : "is-off"}`}
-                  disabled={pending || media.busy}
-                  onClick={() =>
-                    onAction(() =>
-                      media.setCameraEnabled(
-                        !media.room!.localParticipant.isCameraEnabled,
-                      ),
-                    )
-                  }
-                >
-                  <Icon name="camera" />
-                  <span>
-                    {media.room.localParticipant.isCameraEnabled
-                      ? "Apagar cámara"
-                      : "Activar cámara"}
-                  </span>
-                </button>
-                <span className="control-divider" />
-                {typeof navigator.mediaDevices?.getDisplayMedia ===
-                  "function" && (
-                  <button
-                    className={`control-button ${media.room.localParticipant.isScreenShareEnabled ? "sharing" : ""}`}
-                    onClick={share}
-                  >
-                    <Icon name="monitor" />
-                    <span>
-                      {media.room.localParticipant.isScreenShareEnabled
-                        ? "Dejar de compartir"
-                        : "Compartir pantalla"}
-                    </span>
-                  </button>
-                )}
-                {admin && (
-                  <button
-                    className="control-button"
-                    onClick={() => {
-                      setSourceTab("files");
-                      fileRef.current?.click();
-                    }}
-                  >
-                    <Icon name="upload" />
-                    <span>Subir archivo</span>
-                  </button>
-                )}
-                <LiveDevices
-                  switchDevice={media.switchActiveDevice}
-                  action={onAction}
-                />
-                <button
-                  className="quiet-icon"
-                  title="Activar audio de la sala"
-                  aria-label="Activar audio de la sala"
-                  onClick={() => onAction(() => media.room!.startAudio())}
-                >
-                  <Icon name="volume" />
-                </button>
-              </>
-            )}
-          </div>
-          {!media.room && deviceOpen && (
-            <DeviceSetup
-              onPreferences={onPreferences}
-              suspended={media.busy || pending}
-            />
-          )}
+  );
+  const sourceDeck = (
           <section className="source-deck">
             <div className="source-deck-heading">
               <div role="tablist" aria-label="Fuentes del estudio">
@@ -927,7 +629,7 @@ export function StudioWorkspace({
                 }}
               >
                 <div className="library-heading">
-                  <p>Imágenes y videos listos para tu programa.</p>
+                  <p>Imágenes y videos para tu programa, y música para las pantallas.</p>
                   <button
                     className="button"
                     disabled={progress !== null}
@@ -963,6 +665,10 @@ export function StudioWorkspace({
                               alt=""
                               loading="lazy"
                             />
+                          ) : item.kind === "audio" ? (
+                            <span>
+                              <Icon name="volume" size={18} />
+                            </span>
                           ) : (
                             <>
                               <video
@@ -977,7 +683,11 @@ export function StudioWorkspace({
                             </>
                           )}
                           <span className="asset-kind">
-                            {item.kind === "video" ? "VIDEO" : "IMAGEN"}
+                            {item.kind === "video"
+                              ? "VIDEO"
+                              : item.kind === "audio"
+                                ? "AUDIO"
+                                : "IMAGEN"}
                           </span>
                         </div>
                         <b title={item.name}>{item.name}</b>
@@ -985,17 +695,21 @@ export function StudioWorkspace({
                           {(item.bytes / 1024 / 1024).toFixed(1)} MB
                         </small>
                         <div>
-                          <button
-                            className="button"
-                            disabled={pending}
-                            onClick={() =>
-                              p.media_asset === item.id
-                                ? clearContent()
-                                : showAsset(item.id)
-                            }
-                          >
-                            {p.media_asset === item.id ? "Retirar" : "Mostrar"}
-                          </button>
+                          {item.kind === "audio" ? (
+                            <small>Música para pantallas</small>
+                          ) : (
+                            <button
+                              className="button"
+                              disabled={pending}
+                              onClick={() =>
+                                p.media_asset === item.id
+                                  ? clearContent()
+                                  : showAsset(item.id)
+                              }
+                            >
+                              {p.media_asset === item.id ? "Retirar" : "Mostrar"}
+                            </button>
+                          )}
                           <button
                             className="quiet-icon"
                             title="Eliminar archivo"
@@ -1003,6 +717,7 @@ export function StudioWorkspace({
                             disabled={
                               p.media_asset === item.id ||
                               p.background_asset === item.id ||
+                              usedBySlate(item.id) ||
                               pending
                             }
                             onClick={() => {
@@ -1030,7 +745,7 @@ export function StudioWorkspace({
                     <Icon name="upload" size={30} />
                     <b>Arrastra una imagen o un video</b>
                     <span>o haz clic para buscar en tu equipo</span>
-                    <small>PNG, JPG, WebP · 20 MB / MP4, WebM · 500 MB</small>
+                    <small>PNG, JPG, WebP · 20 MB / MP4, WebM · 500 MB / MP3, OGG, WAV, M4A · 50 MB</small>
                   </button>
                 )}
                 <p className="source-caption">
@@ -1043,9 +758,9 @@ export function StudioWorkspace({
             <input
               ref={fileRef}
               type="file"
-              accept="image/png,image/jpeg,image/webp,video/mp4,video/webm"
+              accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,audio/mpeg,audio/ogg,audio/wav,audio/mp4,.mp3,.ogg,.wav,.m4a"
               className="visually-hidden"
-              aria-label="Subir imagen o video"
+              aria-label="Subir imagen, video o audio"
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 event.target.value = "";
@@ -1053,7 +768,8 @@ export function StudioWorkspace({
               }}
             />
           </section>
-          {admin && waiting.length > 0 && (
+  );
+  const waitingList = admin && waiting.length > 0 && (
             <section className="waiting-list">
               <div>
                 <h3>Sala de espera</h3>
@@ -1095,9 +811,8 @@ export function StudioWorkspace({
                 </div>
               ))}
             </section>
-          )}
-        </section>
-        {admin && (
+  );
+  const inspectorPanel = (
           <aside className="workspace-inspector">
             <div
               className="inspector-tabs"
@@ -1408,7 +1123,7 @@ export function StudioWorkspace({
                       ? (studio.destinations ?? [])
                           .filter((d) => d.enabled)
                           .map((d) => d.name)
-                          .join(" · ") || "1080p · grabación automática"
+                          .join(" · ") || "1080p"
                       : "Configura YouTube, Twitch u otro destino RTMP"}
                   </small>
                 </div>
@@ -1428,7 +1143,633 @@ export function StudioWorkspace({
               </button>
             </section>
           </aside>
+  );
+  const returnLabel = [
+    p.layout === "grid"
+      ? "Conversación"
+      : p.layout === "spotlight"
+        ? "Protagonista"
+        : contentLabels[p.content_mode || "side"],
+    p.identities.length === 1 ? "1 cámara" : `${p.identities.length} cámaras`,
+  ].join(" · ");
+  const slateControls = studio.slates && (
+    <div className="slate-controls" role="group" aria-label="Pantallas de la emisión">
+      {slateKinds.map((kind) => (
+        <button
+          key={kind}
+          className={`slate-button ${activeSlate?.kind === kind ? "is-on" : ""}`}
+          aria-pressed={activeSlate?.kind === kind}
+          aria-label={`Pantalla de ${slateNames[kind].toLowerCase()}`}
+          title={studio.slates![kind].title}
+          disabled={pending || activeSlate?.kind === kind}
+          onClick={() => onAction(() => api(`/slates/${kind}/show`, "POST"))}
+        >
+          {slateNames[kind]}
+        </button>
+      ))}
+      <button
+        className="quiet-icon"
+        aria-label="Configurar pantallas"
+        title="Configurar pantallas"
+        onClick={onSettings}
+      >
+        <Icon name="settings" size={14} />
+      </button>
+      {activeSlate && (
+        <span className="slate-return">
+          <button
+            className="button primary"
+            disabled={pending}
+            onClick={() => onAction(() => api("/slates/hide", "POST"))}
+          >
+            Volver al programa
+          </button>
+          <small title={returnLabel}>{returnLabel}</small>
+        </span>
+      )}
+    </div>
+  );
+  const elapsed = broadcast ? Math.max(0, (clock + (studio.clock_offset || 0)) / 1000 - broadcast.created) : 0;
+  const airing = (studio.destinations ?? []).filter((d) => d.enabled);
+  const focusStrip = (
+    <div className="focus-strip">
+      <span className={`broadcast-state ${broadcast?.status === "live" && live ? "is-live" : ""}`}>
+        <i />
+        {broadcast
+          ? broadcast.status === "live" && !live
+            ? statusLabels.recording
+            : statusLabels[broadcast.status]
+          : "Preparando"}
+      </span>
+      {running && <span className="focus-clock" role="timer" aria-label="Tiempo de la sesión">{formatCountdown(elapsed)}</span>}
+      {recording && (
+        <span className="focus-rec">
+          <i className="record-mark" aria-hidden="true" />
+          REC
+        </span>
+      )}
+      {live && airing.length > 0 && (
+        <span className="focus-destinations">
+          {airing.map((d) => (
+            <span key={d.id} className={`focus-destination is-${d.status}`} title={`${d.name}: ${destinationLabels[d.status]}`}>
+              <i />
+              {d.name}
+            </span>
+          ))}
+        </span>
+      )}
+      <span className="session-meta">
+        <Icon name="people" size={15} />
+        {cameraPeople.length}/6
+      </span>
+      {waiting.length > 0 && (
+        <button
+          className="button focus-waiting"
+          onClick={() => {
+            setPanelClosed(false);
+            setPanelTab("sources");
+            setSourceTab("people");
+          }}
+        >
+          {waiting.length === 1 ? "1 persona espera" : `${waiting.length} personas esperan`}
+        </button>
+      )}
+      <span className="focus-strip-end">
+        <ResourceMonitor />
+        {onInvite && (
+          <button className="button" disabled={pending} onClick={onInvite}>
+            Invitar
+          </button>
         )}
+        <button className="button" onClick={() => onFocus?.(false)}>
+          Salir del foco
+        </button>
+      </span>
+    </div>
+  );
+  const panelTabs = [
+    { key: "scenes", label: "Escenas", icon: "grid" },
+    { key: "sources", label: "Fuentes", icon: "people" },
+    { key: "settings", label: "Ajustes", icon: "settings" },
+  ] as const;
+  const focusPanel = (
+    <aside className={`focus-panel ${panelClosed ? "is-closed" : ""}`} aria-label="Panel del estudio">
+      <div className="focus-panel-tabs" role="tablist" aria-label="Panel del estudio">
+        {panelTabs.map((item) => (
+          <button
+            key={item.key}
+            role="tab"
+            aria-selected={!panelClosed && panelTab === item.key}
+            title={item.label}
+            className={!panelClosed && panelTab === item.key ? "active" : ""}
+            onClick={() => {
+              setPanelTab(item.key);
+              setPanelClosed(false);
+            }}
+          >
+            <Icon name={item.icon} size={15} />
+            <span>{item.label}</span>
+          </button>
+        ))}
+        <button
+          className="focus-panel-toggle"
+          aria-label={panelClosed ? "Abrir panel" : "Cerrar panel"}
+          aria-expanded={!panelClosed}
+          title={panelClosed ? "Abrir panel" : "Cerrar panel"}
+          onClick={() => setPanelClosed(!panelClosed)}
+        >
+          {panelClosed ? "‹" : "›"}
+        </button>
+      </div>
+      {!panelClosed && (
+        <div className="focus-panel-body" role="tabpanel">
+          {panelTab === "scenes" && scenes}
+          {panelTab === "sources" && (
+            <>
+              {waitingList}
+              {sourceDeck}
+            </>
+          )}
+          {panelTab === "settings" && inspectorPanel}
+        </div>
+      )}
+    </aside>
+  );
+  const broadcastBar = (
+        <footer className="workspace-broadcast-bar">
+          <div className="broadcast-summary">
+            <span
+              className={`ready-indicator ${studio.destination_configured ? "ready" : ""}`}
+            />
+            <div>
+              <b>
+                {live && recording
+                  ? "En directo y grabando"
+                  : live
+                    ? "En directo, sin grabar"
+                    : recording
+                      ? "Grabando, sin emitir"
+                      : studio.destination_configured
+                    ? "Listo para salir al aire"
+                    : "Prepara tu programa a tu ritmo"}
+              </b>
+              <small>
+                {running
+                  ? "Mantén el estudio abierto hasta terminar"
+                  : "Vista previa privada hasta que emitas o grabes"}
+              </small>
+            </div>
+          </div>
+          {slateControls}
+          {focus && compositionBar}
+          <div>
+            {independent ? (
+              <>
+                <button
+                  className={`button ${recording ? "danger" : ""} broadcast-button`}
+                  disabled={pending || ending}
+                  aria-pressed={recording}
+                  onClick={() =>
+                    onAction(() =>
+                      api(`/recording/${recording ? "stop" : "start"}`, "POST"),
+                    )
+                  }
+                >
+                  <i className="record-mark" aria-hidden="true" />
+                  {recording ? "Detener grabación" : "Grabar"}
+                </button>
+                <button
+                  className={`button ${live ? "danger" : "primary"} broadcast-button`}
+                  disabled={
+                    pending ||
+                    ending ||
+                    (!live && !studio.destination_configured)
+                  }
+                  aria-pressed={live}
+                  onClick={() =>
+                    onAction(() =>
+                      api(`/broadcast/${live ? "stop" : "start"}`, "POST"),
+                    )
+                  }
+                >
+                  <Icon name={live ? "close" : "play"} size={16} />
+                  {pending
+                    ? "Procesando…"
+                    : live
+                      ? "Finalizar directo"
+                      : "Iniciar directo"}
+                </button>
+              </>
+            ) : running ? (
+              <button
+                className="button danger broadcast-button"
+                disabled={pending || ending}
+                onClick={() =>
+                  onAction(() => api("/broadcast/stop?all=true", "POST"))
+                }
+              >
+                <Icon name="close" size={16} />
+                {pending ? "Procesando…" : "Finalizar sesión"}
+              </button>
+            ) : (
+              <>
+                <label className="record-option">
+                  <input
+                    type="checkbox"
+                    checked={recordWithLive}
+                    onChange={(e) => setRecordWithLive(e.target.checked)}
+                  />
+                  Grabar también
+                </label>
+                <button
+                  className="button broadcast-button"
+                  disabled={pending}
+                  onClick={() =>
+                    onAction(() => api("/recording/start", "POST"))
+                  }
+                >
+                  <i className="record-mark" aria-hidden="true" />
+                  Solo grabar
+                </button>
+                <button
+                  className="button primary broadcast-button"
+                  disabled={pending || !studio.destination_configured}
+                  onClick={() =>
+                    onAction(() =>
+                      api(
+                        `/broadcast/start${recordWithLive ? "?record=true" : ""}`,
+                        "POST",
+                      ),
+                    )
+                  }
+                >
+                  <Icon name="play" size={16} />
+                  {pending ? "Procesando…" : "Iniciar directo"}
+                </button>
+              </>
+            )}
+          </div>
+        </footer>
+  );
+  return (
+    <div className={`studio-workspace ${focus ? "is-focus" : ""}`}>
+      {focus && focusStrip}
+      {!focus && <div className="workspace-heading">
+        <div>
+          <span className="section-kicker">ESTUDIO PERSONAL</span>
+          <h2>
+            Mi estudio <span className="pill">{format === "portrait" ? "9:16" : "16:9"} · 1080p · 30 fps</span>
+          </h2>
+        </div>
+        <div className="workspace-heading-right">
+          {admin && <ResourceMonitor />}
+          <span
+            className={`broadcast-state ${broadcast?.status === "live" && live ? "is-live" : ""}`}
+          >
+            <i />
+            {broadcast
+              ? broadcast.status === "live" && !live
+                ? statusLabels.recording
+                : statusLabels[broadcast.status]
+              : "Preparando"}
+          </span>
+          <span className="session-meta">
+            <Icon name="people" size={15} />
+            {cameraPeople.length}/6
+          </span>
+          {admin && onFocus && (
+            <button className="button" onClick={() => onFocus(true)}>
+              <Icon name="maximize" size={14} />
+              Modo foco
+            </button>
+          )}
+        </div>
+      </div>}
+      {!admin && shown && (
+        <div className="alert">
+          Se está mostrando una pantalla de {slateNames[activeSlate!.kind].toLowerCase()}: ahora no estás al aire, y el público no te ve ni te oye.
+        </div>
+      )}
+      <div className={`studio-grid ${admin ? "" : "guest-workspace"}`}>
+        <section className="workspace-main">
+          <div className="studio-preview" ref={stageRef}>
+            <div className="preview-title">
+              <span>
+                <Icon name="eye" size={14} /> VISTA DEL PROGRAMA
+              </span>
+              <div>
+                {shown ? (
+                  <span>Pantalla de {slateNames[activeSlate!.kind].toLowerCase()} al aire</span>
+                ) : content ? (
+                  <span className="preview-source-name">
+                    {asset?.name ||
+                      `Pantalla de ${names[p.screen || ""] || "invitado"}`}
+                  </span>
+                ) : (
+                  <span>Cámaras · {p.identities.length} en programa</span>
+                )}
+                <button
+                  className="quiet-icon"
+                  aria-label="Ampliar vista previa"
+                  title="Ampliar vista previa"
+                  onClick={() => void stageRef.current?.requestFullscreen()}
+                >
+                  <Icon name="maximize" size={15} />
+                </button>
+              </div>
+            </div>
+            <Stage
+              format={format}
+              program={p}
+              slate={shown}
+              room={media.room}
+              names={names}
+              revision={media.revision}
+              assets={assets}
+              clockOffset={studio.clock_offset || 0}
+              onMediaInfo={mediaInfo}
+              previewAudio={previewAudio}
+            />
+            <div className="program-status">
+              <span>
+                <i className={running ? "live-dot" : ""} />
+                {live
+                  ? "Programa en emisión"
+                  : recording
+                    ? "Programa en grabación"
+                    : "La emisión aún no ha comenzado"}
+              </span>
+              {shown ? (
+                <span className="audio-off">
+                  <Icon name="mic" size={12} /> Cámaras y micrófonos fuera del aire
+                  {shown.slate.music_asset ? " · con música" : ""}
+                </span>
+              ) : !p.microphones_enabled ? (
+                <span className="audio-off">
+                  <Icon name="mic" size={12} /> Micrófonos fuera del programa
+                </span>
+              ) : (
+                <span>
+                  <Icon name="mic" size={12} />
+                  {p.identities.length}{" "}
+                  {p.identities.length === 1
+                    ? "voz seleccionada"
+                    : "voces seleccionadas"}
+                </span>
+              )}
+            </div>
+          </div>
+          {!focus && compositionBar}
+          {content && admin && (
+            <div className="content-toolbar">
+              <div>
+                <Icon
+                  name={
+                    asset?.kind === "video"
+                      ? "film"
+                      : asset
+                        ? "image"
+                        : "monitor"
+                  }
+                />
+                <span title={asset?.name}>
+                  {asset?.name ||
+                    `Pantalla de ${names[p.screen || ""] || "invitado"}`}
+                </span>
+                <span className="pill">Sin recortes</span>
+              </div>
+              <button
+                className="text-button"
+                disabled={pending}
+                onClick={clearContent}
+              >
+                <Icon name="close" size={14} /> Retirar del programa
+              </button>
+            </div>
+          )}
+          {asset?.kind === "video" && content && admin && (
+            <div className="clip-controls">
+              <button
+                className="clip-play"
+                aria-label={
+                  p.playback.playing && !finished
+                    ? "Pausar video"
+                    : "Reproducir video"
+                }
+                disabled={pending || Boolean(mediaError)}
+                onClick={() =>
+                  setPlayback({
+                    playing: !p.playback.playing || finished,
+                    position:
+                      selectedPosition >= duration - 0.1 ? 0 : selectedPosition,
+                    started_at_ms: null,
+                  })
+                }
+              >
+                <Icon
+                  name={p.playback.playing && !finished ? "pause" : "play"}
+                  size={17}
+                />
+              </button>
+              <button
+                className="quiet-icon"
+                aria-label="Reiniciar video"
+                disabled={pending}
+                onClick={() =>
+                  setPlayback({
+                    position: 0,
+                    playing: true,
+                    started_at_ms: null,
+                  })
+                }
+              >
+                <Icon name="refresh" size={15} />
+              </button>
+              <span className="clip-time">
+                {formatTime(scrub ?? selectedPosition)} / {formatTime(duration)}
+              </span>
+              <input
+                aria-label="Posición del video"
+                type="range"
+                min={0}
+                max={duration || 1}
+                step={0.1}
+                value={scrub ?? Math.min(selectedPosition, duration || 1)}
+                onChange={(e) => setScrub(Number(e.target.value))}
+                onPointerUp={() => {
+                  if (scrub !== null) {
+                    void setPlayback({ position: scrub, started_at_ms: null });
+                    setScrub(null);
+                  }
+                }}
+                onKeyUp={() => {
+                  if (scrub !== null) {
+                    void setPlayback({ position: scrub, started_at_ms: null });
+                    setScrub(null);
+                  }
+                }}
+              />
+              <button
+                className={`quiet-icon ${previewAudio ? "selected" : ""}`}
+                aria-label={
+                  previewAudio
+                    ? "Dejar de escuchar archivo"
+                    : "Escuchar archivo en este equipo"
+                }
+                title="Escuchar archivo en este equipo"
+                onClick={() => setPreviewAudio(!previewAudio)}
+              >
+                <Icon name="volume" size={16} />
+              </button>
+              <label className="clip-loop">
+                <input
+                  type="checkbox"
+                  checked={p.playback.looped}
+                  onChange={(e) => setPlayback({ looped: e.target.checked })}
+                />
+                Repetir
+              </label>
+            </div>
+          )}
+          {mediaError && <div className="alert error">{mediaError}</div>}
+          {hint && (
+            <div className="studio-hint">
+              <Icon name="monitor" size={16} />
+              <span>{hint}</span>
+              <button
+                className="quiet-icon"
+                aria-label="Cerrar ayuda"
+                onClick={() => setHint("")}
+              >
+                <Icon name="close" size={14} />
+              </button>
+            </div>
+          )}
+          <div className="studio-controls">
+            <button
+              className="control-button"
+              onClick={() => setEffectsOpen(true)}
+            >
+              <Icon name="camera" />
+              <span>Efectos de cámara</span>
+            </button>
+            <button
+              className="control-button"
+              onClick={() => setQualityOpen(true)}
+            >
+              <Icon name="camera" />
+              <span>Calidad de cámara</span>
+            </button>
+            {!media.room ? (
+              <>
+                <button
+                  className="button primary"
+                  disabled={media.busy || pending}
+                  onClick={onConnect}
+                >
+                  <Icon name="camera" />
+                  {media.busy
+                    ? "Conectando a la sala…"
+                    : "Conectar cámara y audio"}
+                </button>
+                <button
+                  className="button"
+                  onClick={() => setDeviceOpen(!deviceOpen)}
+                >
+                  <Icon name="settings" />
+                  Probar dispositivos
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className={`control-button ${media.room.localParticipant.isMicrophoneEnabled ? "" : "is-off"}`}
+                  title="Control de tu micrófono en la sala"
+                  onClick={() =>
+                    onAction(() =>
+                      media.room!.localParticipant.setMicrophoneEnabled(
+                        !media.room!.localParticipant.isMicrophoneEnabled,
+                      ),
+                    )
+                  }
+                >
+                  <Icon name="mic" />
+                  <span>
+                    {media.room.localParticipant.isMicrophoneEnabled
+                      ? "Silenciar"
+                      : "Activar micrófono"}
+                  </span>
+                </button>
+                <button
+                  className={`control-button ${media.room.localParticipant.isCameraEnabled ? "" : "is-off"}`}
+                  disabled={pending || media.busy}
+                  onClick={() =>
+                    onAction(() =>
+                      media.setCameraEnabled(
+                        !media.room!.localParticipant.isCameraEnabled,
+                      ),
+                    )
+                  }
+                >
+                  <Icon name="camera" />
+                  <span>
+                    {media.room.localParticipant.isCameraEnabled
+                      ? "Apagar cámara"
+                      : "Activar cámara"}
+                  </span>
+                </button>
+                <span className="control-divider" />
+                {typeof navigator.mediaDevices?.getDisplayMedia ===
+                  "function" && (
+                  <button
+                    className={`control-button ${media.room.localParticipant.isScreenShareEnabled ? "sharing" : ""}`}
+                    onClick={share}
+                  >
+                    <Icon name="monitor" />
+                    <span>
+                      {media.room.localParticipant.isScreenShareEnabled
+                        ? "Dejar de compartir"
+                        : "Compartir pantalla"}
+                    </span>
+                  </button>
+                )}
+                {admin && (
+                  <button
+                    className="control-button"
+                    onClick={() => {
+                      setSourceTab("files");
+                      fileRef.current?.click();
+                    }}
+                  >
+                    <Icon name="upload" />
+                    <span>Subir archivo</span>
+                  </button>
+                )}
+                <LiveDevices
+                  switchDevice={media.switchActiveDevice}
+                  action={onAction}
+                />
+                <button
+                  className="quiet-icon"
+                  title="Activar audio de la sala"
+                  aria-label="Activar audio de la sala"
+                  onClick={() => onAction(() => media.room!.startAudio())}
+                >
+                  <Icon name="volume" />
+                </button>
+              </>
+            )}
+          </div>
+          {!media.room && deviceOpen && (
+            <DeviceSetup
+              onPreferences={onPreferences}
+              suspended={media.busy || pending}
+            />
+          )}
+          {!focus && sourceDeck}
+          {!focus && waitingList}
+        </section>
+        {admin && (focus ? focusPanel : inspectorPanel)}
       </div>
       {qualityOpen && (
         <CameraQualityDialog
@@ -1467,55 +1808,7 @@ export function StudioWorkspace({
           )}
         </div>
       )}
-      {admin && (
-        <footer className="workspace-broadcast-bar">
-          <div>
-            <span
-              className={`ready-indicator ${studio.destination_configured ? "ready" : ""}`}
-            />
-            <div>
-              <b>
-                {running
-                  ? "Tu programa está en proceso"
-                  : studio.destination_configured
-                    ? "Listo para salir al aire"
-                    : "Prepara tu programa a tu ritmo"}
-              </b>
-              <small>
-                {running
-                  ? "Mantén el estudio abierto durante el directo"
-                  : "Vista previa privada hasta que inicies el directo"}
-              </small>
-            </div>
-          </div>
-          <div>
-            <span className="recording-note">
-              <i />
-              Grabación automática
-            </span>
-            <button
-              className={`button ${running ? "danger" : "primary"} broadcast-button`}
-              disabled={
-                pending ||
-                (!running && !studio.destination_configured) ||
-                broadcast?.status === "ending"
-              }
-              onClick={() =>
-                onAction(() =>
-                  api(`/broadcast/${running ? "stop" : "start"}`, "POST"),
-                )
-              }
-            >
-              <Icon name={running ? "close" : "play"} size={16} />
-              {pending
-                ? "Procesando…"
-                : running
-                  ? "Finalizar directo"
-                  : "Iniciar directo"}
-            </button>
-          </div>
-        </footer>
-      )}
+      {admin && broadcastBar}
     </div>
   );
 }

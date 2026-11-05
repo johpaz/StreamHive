@@ -45,14 +45,14 @@ try {
     assert(r.ok(), path + ": " + await r.text()); return r.json();
   };
   await request("/destinations", { platform: "custom", name: "Local receiver", url: `rtmp://127.0.0.1:${rtmp}/live`, key: "test" });
-  const started = await request("/broadcast/start", {});
+  const started = await request("/broadcast/start?record=true", {});
   const studio = async () => (await page.request.get(origin + "/api/v1/studio")).json();
   for (let i = 0; ; i++) {
     const state = await studio(); if (state.destinations[0]?.status === "live") break;
     assert(i < 120, "RTMP never became live: " + JSON.stringify(state.broadcast)); await sleep(500);
   }
   assert(page.frames().some(f => f.url().includes("ingest=1")), "no browser compositor started");
-  await sleep(4000); await request("/broadcast/stop", {});
+  await sleep(4000); await request("/broadcast/stop?all=true", {});
   for (let i = 0; ; i++) { if ((await studio()).broadcast.status === "complete") break; assert(i < 100, "recording did not complete"); await sleep(200); }
   await sleep(1000);
   for (const file of [received, join(work, "recordings", started.id + ".mp4")]) {

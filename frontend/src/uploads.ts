@@ -15,18 +15,22 @@ export function uploadAsset(
           webp: "image/webp",
           mp4: "video/mp4",
           webm: "video/webm",
+          mp3: "audio/mpeg",
+          ogg: "audio/ogg",
+          wav: "audio/wav",
+          m4a: "audio/mp4",
         } as Record<string, string>
       )[file.name.split(".").at(-1)?.toLowerCase() || ""];
     if (!mime) {
       reject(
         Error(
-          "Usa imágenes PNG/JPG/WebP o videos MP4/WebM. Para manuales PDF, comparte su ventana.",
+          "Usa imágenes PNG/JPG/WebP, videos MP4/WebM o audio MP3/OGG/WAV/M4A. Para manuales PDF, comparte su ventana.",
         ),
       );
       return;
     }
-    if (file.size > (mime.startsWith("image/") ? 20 : 500) * 1024 * 1024) {
-      reject(Error("Máximo 20 MB por imagen y 500 MB por video"));
+    if (file.size > (mime.startsWith("image/") ? 20 : mime.startsWith("audio/") ? 50 : 500) * 1024 * 1024) {
+      reject(Error("Máximo 20 MB por imagen, 50 MB por audio y 500 MB por video"));
       return;
     }
     const request = new XMLHttpRequest();

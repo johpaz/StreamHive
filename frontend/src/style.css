@@ -747,6 +747,31 @@ main {
   font-size: 10px;
   margin: 6px 0 18px;
 }
+.folder-path {
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+p.folder-path {
+  text-align: left;
+  font-size: 11px;
+  opacity: 0.75;
+}
+.folder-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+.folder-field input {
+  width: 100%;
+  font-family: ui-monospace, monospace;
+}
+.folder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
 .output-row {
   display: flex;
   justify-content: space-between;

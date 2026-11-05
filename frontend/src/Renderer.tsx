@@ -3,11 +3,14 @@ import { Stage } from "./Stage";
 import { startProgramCapture } from "./compositor";
 import { allowedTrack, participants, useRoom } from "./media";
 import { layerDimensions } from "./composition";
+import { shownSlate, slateProgram } from "./slate";
 import {
   initialProgram,
   normalizeProgram,
   type Program,
   type Asset,
+  type ActiveSlate,
+  type Slates,
 } from "./types";
 export function Renderer() {
   const query = new URLSearchParams(location.search);
@@ -20,6 +23,8 @@ export function Renderer() {
     assets: Asset[];
     server_time_ms: number;
     names: Record<string, string>;
+    slates?: Slates;
+    active_slate?: ActiveSlate | null;
   } | null>(null);
   const [error, setError] = useState("");
   const [clockOffset, setClockOffset] = useState(0);
@@ -88,10 +93,16 @@ export function Renderer() {
       .then((c) => media.connect(c))
       .catch((e) => setError(String(e)));
   }, [Boolean(state)]);
+  const shown = shownSlate(state?.slates, state?.active_slate);
   useEffect(() => {
     if (!state || !media.room) return;
     const room = media.room;
-    const program = error ? initialProgram : state.program;
+    // Con una pantalla al aire no se suscribe a cámaras, micrófonos ni pantallas.
+    const program = error
+      ? initialProgram
+      : shown
+        ? slateProgram(state.program, shown.slate)
+        : state.program;
     let cancelled = false;
     for (const p of room.remoteParticipants.values())
       for (const pub of p.trackPublications.values())
@@ -161,6 +172,8 @@ export function Renderer() {
     };
   }, [
     state?.program.revision,
+    state?.active_slate?.kind,
+    shown?.slate.background_asset,
     media.room,
     media.revision,
     error,
@@ -192,6 +205,7 @@ export function Renderer() {
     <Stage
       format={format}
       program={state.program}
+      slate={shown}
       room={media.room}
       names={state.names}
       renderer

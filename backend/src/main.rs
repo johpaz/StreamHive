@@ -126,6 +126,12 @@ impl App {
                 + 1_000_000_000,
         )
     }
+    /// Carpeta donde se escriben las grabaciones nuevas.
+    fn recordings_dir(&self, d: &Data) -> PathBuf {
+        d.recordings_dir
+            .as_ref()
+            .map_or_else(|| self.recordings.clone(), PathBuf::from)
+    }
     fn persist(&self, d: &mut Data) -> Result<(), Error> {
         let store = self.store.lock().unwrap();
         if let Err(error) = store.save(d) {
@@ -400,7 +406,7 @@ fn destination_state(d: &Data, x: &StoredDestination) -> String {
         .and_then(|b| b.destination_statuses.get(&x.id))
         .cloned()
         .unwrap_or_else(|| {
-            if d.active().is_some() {
+            if d.active().is_some_and(|b| b.live) {
                 "connecting"
             } else {
                 "ready"
@@ -413,7 +419,8 @@ fn snapshot(d: &Data) -> Value {
         "participants":d.participants.values().map(|p|json!({"id":p.id,"name":p.name,"status":p.status,"connected":p.connected})).collect::<Vec<_>>(),
         "broadcast":d.broadcasts.last(),"destination_configured":d.destinations.iter().any(|x|x.enabled),
         "destinations":d.destinations.iter().map(|x|json!({"id":x.id,"name":x.name,"platform":x.platform,"enabled":x.enabled,"format":x.format,"status":destination_state(d,x)})).collect::<Vec<_>>(),
-        "assets":d.assets.values().collect::<Vec<_>>(),"server_time_ms":now_ms()})
+        "assets":d.assets.values().collect::<Vec<_>>(),"server_time_ms":now_ms(),
+        "slates":d.slates,"active_slate":d.active_slate})
 }
 async fn studio(State(s): State<App>, h: HeaderMap) -> Reply {
     s.participant(&h).await?;
@@ -422,12 +429,16 @@ async fn studio(State(s): State<App>, h: HeaderMap) -> Reply {
     if let Some(b) = v.get_mut("broadcast").and_then(|v| v.as_object_mut()) {
         b.remove("renderer_hash");
     }
+    v["independent_services"] = json!(s.engine.independent_services());
     Ok(Json(v))
 }
 async fn status(State(s): State<App>, h: HeaderMap) -> Reply {
     s.admin(&h)?;
-    let bytes =
-        fs2::available_space(&s.recordings).map_err(|e| Error::from(anyhow::Error::new(e)))?;
+    let dir = s.recordings_dir(&*s.data.lock().await);
+    // Una carpeta no disponible (disco extraído) no debe tumbar el estado del servidor.
+    let bytes = fs2::available_space(&dir)
+        .or_else(|_| fs2::available_space(&s.recordings))
+        .map_err(|e| Error::from(anyhow::Error::new(e)))?;
     let lk =
         s.lk.rpc("RoomService", "ListRooms", json!({"names":[ROOM]}))
             .await
@@ -658,6 +669,24 @@ async fn scene_save(State(s): State<App>, h: HeaderMap, Json(body): Json<SaveSce
     s.persist(&mut d)?;
     Ok(Json(json!(scene)))
 }
+/// Sustituye el contenido de una escena por el programa actual de su formato.
+async fn scene_update(State(s): State<App>, h: HeaderMap, Path(id): Path<String>) -> Reply {
+    s.admin(&h)?;
+    let _guard = s.operations.lock().await;
+    let mut d = s.data.lock().await;
+    let format = d
+        .scenes
+        .iter()
+        .find(|x| x.id == id)
+        .map(|x| x.format)
+        .ok_or_else(|| bad("Escena inexistente"))?;
+    let program = d.program_for(format).clone();
+    let scene = d.scenes.iter_mut().find(|x| x.id == id).unwrap();
+    scene.program = program;
+    let scene = scene.clone();
+    s.persist(&mut d)?;
+    Ok(Json(json!(scene)))
+}
 async fn scene_activate(State(s): State<App>, h: HeaderMap, Path(id): Path<String>) -> Reply {
     s.admin(&h)?;
     let _guard = s.operations.lock().await;
@@ -687,6 +716,82 @@ async fn scene_remove(State(s): State<App>, h: HeaderMap, Path(id): Path<String>
     if previous == d.scenes.len() {
         return Err(bad("Escena inexistente"));
     }
+    s.persist(&mut d)?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn slate_update(
+    State(s): State<App>,
+    h: HeaderMap,
+    Path(kind): Path<SlateKind>,
+    Json(slate): Json<Slate>,
+) -> Reply {
+    s.admin(&h)?;
+    let _guard = s.operations.lock().await;
+    let mut d = s.data.lock().await;
+    d.validate_slate(&slate).map_err(bad)?;
+    *d.slates.get_mut(kind) = slate;
+    s.persist(&mut d)?;
+    Ok(Json(json!(d.slates.get(kind))))
+}
+/// Pone una pantalla al aire; si tiene temporizador, programa qué ocurre al llegar a cero.
+fn show_slate(s: &App, d: &mut Data, kind: SlateKind) -> Result<(), Error> {
+    let started_at_ms = now_ms();
+    let seconds = d.slates.get(kind).timer_seconds;
+    let active = ActiveSlate {
+        kind,
+        started_at_ms,
+        ends_at_ms: (seconds > 0).then(|| started_at_ms + u64::from(seconds) * 1000),
+    };
+    d.active_slate = Some(active.clone());
+    s.persist(d)?;
+    if seconds > 0 {
+        let worker = s.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(seconds.into())).await;
+            let _guard = worker.operations.lock().await;
+            if let Err(e) = finish_slate_timer(&worker, &active).await {
+                tracing::warn!("no se pudo aplicar el fin del temporizador: {}", e.1);
+            }
+        });
+    }
+    Ok(())
+}
+/// Solo actúa si sigue al aire esa misma pantalla y tiene el modo automático activado.
+/// Quien llama debe tener el bloqueo de `operations`.
+async fn finish_slate_timer(s: &App, expected: &ActiveSlate) -> Result<(), Error> {
+    let session = {
+        let mut d = s.data.lock().await;
+        if d.active_slate.as_ref() != Some(expected)
+            || !d.slates.get(expected.kind).auto_on_timer_end
+        {
+            return Ok(());
+        }
+        let session = d.active().is_some();
+        if expected.kind != SlateKind::End || !session {
+            d.active_slate = None;
+            s.persist(&mut d)?;
+            return Ok(());
+        }
+        session
+    };
+    // La pantalla de fin sigue visible hasta que la sesión termina de cerrarse.
+    if session {
+        stop_live(s, true).await?;
+    }
+    Ok(())
+}
+async fn slate_show(State(s): State<App>, h: HeaderMap, Path(kind): Path<SlateKind>) -> Reply {
+    s.admin(&h)?;
+    let _guard = s.operations.lock().await;
+    let mut d = s.data.lock().await;
+    show_slate(&s, &mut d, kind)?;
+    Ok(Json(json!(d.active_slate)))
+}
+async fn slate_hide(State(s): State<App>, h: HeaderMap) -> Reply {
+    s.admin(&h)?;
+    let _guard = s.operations.lock().await;
+    let mut d = s.data.lock().await;
+    d.active_slate = None;
     s.persist(&mut d)?;
     Ok(Json(json!({"ok":true})))
 }
@@ -1063,24 +1168,166 @@ fn output_groups(master: &[u8], d: &Data) -> Result<Vec<(OutputFormat, Vec<Strin
         })
         .collect()
 }
-async fn start(State(s): State<App>, h: HeaderMap) -> Reply {
+#[derive(Deserialize, Default)]
+struct StartQuery {
+    #[serde(default)]
+    record: bool,
+}
+#[derive(Deserialize, Default)]
+struct StopQuery {
+    /// Finaliza todos los servicios de la sesión.
+    #[serde(default)]
+    all: bool,
+}
+const NO_DESTINATION: &str = "Configura y activa al menos un destino de transmisión";
+const FIXED_SERVICES: &str =
+    "Este motor fija sus servicios al iniciar: finaliza la sesión para cambiarlos";
+/// Crea la carpeta si falta y comprueba que se pueda escribir de verdad en ella.
+fn prepare_recordings_dir(dir: &std::path::Path) -> Result<(), Error> {
+    let unusable =
+        |e: std::io::Error| bad(&format!("No se puede guardar en {}: {e}", dir.display()));
+    std::fs::create_dir_all(dir).map_err(unusable)?;
+    let probe = dir.join(format!(".streamhive-write-test-{}", id()));
+    std::fs::write(&probe, b"").map_err(unusable)?;
+    std::fs::remove_file(&probe).map_err(unusable)
+}
+/// Nunca se graba en otra carpeta sin avisar: si la elegida falla, se informa del error.
+fn ensure_recording_space(s: &App, dir: &std::path::Path, formats: usize) -> Result<(), Error> {
+    prepare_recordings_dir(dir)?;
+    if fs2::available_space(dir).map_err(|e| Error::from(anyhow::Error::new(e)))?
+        < s.required_space() * formats as u64
+    {
+        return Err(bad("Espacio insuficiente para grabar los formatos activos"));
+    }
+    Ok(())
+}
+async fn start(State(s): State<App>, h: HeaderMap, Query(q): Query<StartQuery>) -> Reply {
     s.admin(&h)?;
     let _guard = s.operations.lock().await;
-    let (broadcast_id, render_token, groups, profiles);
+    activate(&s, true, q.record).await
+}
+async fn recording_start(State(s): State<App>, h: HeaderMap) -> Reply {
+    s.admin(&h)?;
+    let _guard = s.operations.lock().await;
+    activate(&s, false, true).await
+}
+/// Activa servicios: en la sesión en curso si la hay; si no, abre una nueva.
+async fn activate(s: &App, live: bool, record: bool) -> Reply {
+    let active = s.data.lock().await.active().cloned();
+    match active {
+        Some(b) => attach_services(s, b, live, record).await,
+        None => start_session(s, live, record).await,
+    }
+}
+async fn attach_services(s: &App, b: Broadcast, live: bool, record: bool) -> Reply {
+    let (add_live, add_record) = (live && !b.live, record && !b.recording);
+    if !add_live && !add_record {
+        return Ok(Json(json!({"id":b.id,"status":b.status})));
+    }
+    if !s.engine.independent_services() {
+        return Err(bad(FIXED_SERVICES));
+    }
+    if b.status == "ending" {
+        return Err(bad("La sesión está finalizando"));
+    }
+    let sessions: Vec<_> = b
+        .outputs
+        .iter()
+        .filter(|(_, id)| !id.is_empty())
+        .map(|(format, id)| (format.clone(), id.clone()))
+        .collect();
+    if sessions.is_empty() {
+        return Err(bad("El inicio todavía se está reconciliando"));
+    }
+    if add_live {
+        let groups = output_groups(&s.master, &*s.data.lock().await)?;
+        if groups.is_empty() {
+            return Err(bad(NO_DESTINATION));
+        }
+        // Los destinos no se pueden editar con la sesión activa: los formatos coinciden.
+        for (format, urls) in &groups {
+            let id = b
+                .outputs
+                .get(format.name())
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| bad("Finaliza la sesión para emitir en este formato"))?;
+            s.engine.set_destinations(id, urls).await?;
+        }
+    }
+    let mut recordings = Vec::new();
+    if add_record {
+        let (dir, directory) = {
+            let d = s.data.lock().await;
+            (s.recordings_dir(&d), d.recordings_dir.clone())
+        };
+        ensure_recording_space(s, &dir, sessions.len())?;
+        for (_, session) in &sessions {
+            let used = {
+                let d = s.data.lock().await;
+                d.recordings
+                    .iter()
+                    .filter(|r| &r.session == session)
+                    .count()
+            };
+            // La primera conserva el nombre de la sesión; las siguientes se numeran.
+            let rid = if used == 0 {
+                session.clone()
+            } else {
+                format!("{session}-r{}", used + 1)
+            };
+            s.engine
+                .start_recording(
+                    session,
+                    output::RecordingTarget {
+                        id: &rid,
+                        dir: &dir,
+                    },
+                )
+                .await?;
+            recordings.push(Recording {
+                id: rid.clone(),
+                session: session.clone(),
+                directory: directory.clone(),
+                filename: format!("{rid}.mp4"),
+                created: now(),
+                status: "recording".into(),
+                bytes: 0,
+                duration: 0.0,
+            });
+        }
+    }
+    let mut d = s.data.lock().await;
+    if add_live && d.slates.start.show_on_go_live {
+        show_slate(s, &mut d, SlateKind::Start)?;
+    }
+    d.recordings.extend(recordings);
+    let current = d.broadcasts.iter_mut().find(|x| x.id == b.id).unwrap();
+    current.live |= add_live;
+    current.recording |= add_record;
+    let reply = json!({"id":current.id,"status":current.status});
+    s.persist(&mut d)?;
+    Ok(Json(reply))
+}
+async fn start_session(s: &App, live: bool, record: bool) -> Reply {
+    let (broadcast_id, render_token, groups, profiles, recordings_dir);
     {
         let mut d = s.data.lock().await;
-        if let Some(b) = d.active() {
-            return Ok(Json(json!({"id":b.id,"status":b.status})));
+        let enabled = output_groups(&s.master, &d)?;
+        if live && enabled.is_empty() {
+            return Err(bad(NO_DESTINATION));
         }
-        groups = output_groups(&s.master, &d)?;
-        if groups.is_empty() {
-            return Err(bad("Configura y activa al menos un destino de transmisión"));
+        // La sesión compone los formatos de los destinos activos para que el directo pueda
+        // sumarse después. Sin destinos, una grabación usa el formato horizontal.
+        groups = if enabled.is_empty() {
+            vec![(OutputFormat::Landscape, Vec::new())]
+        } else {
+            enabled
+        };
+        recordings_dir = s.recordings_dir(&d);
+        if record {
+            ensure_recording_space(s, &recordings_dir, groups.len())?;
         }
-        if fs2::available_space(&s.recordings).map_err(|e| Error::from(anyhow::Error::new(e)))?
-            < s.required_space() * groups.len() as u64
-        {
-            return Err(bad("Espacio insuficiente para grabar los formatos activos"));
-        }
+        let directory = d.recordings_dir.clone();
         profiles = groups
             .iter()
             .map(|(format, _)| output_profile(&d, *format, s.video_bitrate, s.audio_bitrate))
@@ -1102,11 +1349,18 @@ async fn start(State(s): State<App>, h: HeaderMap) -> Reply {
                 .collect(),
             destination_statuses: Default::default(),
             renderer_revisions: Default::default(),
+            live,
+            recording: record,
         });
-        for (format, _) in &groups {
+        if live && d.slates.start.show_on_go_live {
+            show_slate(s, &mut d, SlateKind::Start)?;
+        }
+        for (format, _) in groups.iter().filter(|_| record) {
             let rid = format.session_id(&broadcast_id);
             d.recordings.push(Recording {
                 id: rid.clone(),
+                session: rid.clone(),
+                directory: directory.clone(),
                 filename: format!("{rid}.mp4"),
                 created: now(),
                 status: "recording".into(),
@@ -1118,8 +1372,9 @@ async fn start(State(s): State<App>, h: HeaderMap) -> Reply {
     }
     for ((format, destinations), (video_bitrate, audio_bitrate)) in groups.iter().zip(profiles) {
         let session_id = format.session_id(&broadcast_id);
+        // `session` identifica el compositor de Egress aunque no tenga archivo de salida.
         let template = format!(
-            "{}?render_token={render_token}&format={}",
+            "{}?render_token={render_token}&format={}&session={session_id}",
             s.renderer_base,
             format.name()
         );
@@ -1128,7 +1383,11 @@ async fn start(State(s): State<App>, h: HeaderMap) -> Reply {
             .start(output::StartParams {
                 broadcast_id: &session_id,
                 render_url: &template,
-                destinations,
+                destinations: if live { destinations.as_slice() } else { &[] },
+                record: record.then_some(output::RecordingTarget {
+                    id: session_id.as_str(),
+                    dir: &recordings_dir,
+                }),
                 video_bitrate,
                 audio_bitrate,
                 format: *format,
@@ -1170,6 +1429,7 @@ async fn start(State(s): State<App>, h: HeaderMap) -> Reply {
         json!({"id":broadcast_id,"status":d.active().map(|b|&b.status)}),
     ))
 }
+/// Termina la sesión completa: se cierra el encoder y con él todos los servicios.
 async fn stop_inner(s: &App) -> Result<(), Error> {
     let active = { s.data.lock().await.active().cloned() };
     let Some(active) = active else {
@@ -1204,10 +1464,62 @@ async fn stop_inner(s: &App) -> Result<(), Error> {
     s.persist(&mut d)?;
     Ok(())
 }
-async fn stop(State(s): State<App>, h: HeaderMap) -> Reply {
+/// Detiene un servicio y conserva el otro; sin otro servicio activo termina la sesión.
+async fn stop_live(s: &App, all: bool) -> Result<(), Error> {
+    let Some(active) = s.data.lock().await.active().cloned() else {
+        return Ok(());
+    };
+    if all || !active.recording {
+        return stop_inner(s).await;
+    }
+    if !active.live {
+        return Ok(());
+    }
+    if !s.engine.independent_services() {
+        return Err(bad(FIXED_SERVICES));
+    }
+    for id in active.outputs.values().filter(|id| !id.is_empty()) {
+        s.engine.set_destinations(id, &[]).await?;
+    }
+    let mut d = s.data.lock().await;
+    let b = d.broadcasts.iter_mut().find(|b| b.id == active.id).unwrap();
+    b.live = false;
+    b.destination_statuses.clear();
+    s.persist(&mut d)?;
+    Ok(())
+}
+async fn stop_recording_service(s: &App) -> Result<(), Error> {
+    let Some(active) = s.data.lock().await.active().cloned() else {
+        return Ok(());
+    };
+    if !active.live {
+        return stop_inner(s).await;
+    }
+    if !active.recording {
+        return Ok(());
+    }
+    if !s.engine.independent_services() {
+        return Err(bad(FIXED_SERVICES));
+    }
+    for id in active.outputs.values().filter(|id| !id.is_empty()) {
+        s.engine.stop_recording(id).await?;
+    }
+    let mut d = s.data.lock().await;
+    let b = d.broadcasts.iter_mut().find(|b| b.id == active.id).unwrap();
+    b.recording = false;
+    s.persist(&mut d)?;
+    Ok(())
+}
+async fn stop(State(s): State<App>, h: HeaderMap, Query(q): Query<StopQuery>) -> Reply {
     s.admin(&h)?;
     let _guard = s.operations.lock().await;
-    stop_inner(&s).await?;
+    stop_live(&s, q.all).await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn recording_stop(State(s): State<App>, h: HeaderMap) -> Reply {
+    s.admin(&h)?;
+    let _guard = s.operations.lock().await;
+    stop_recording_service(&s).await?;
     Ok(Json(json!({"ok":true})))
 }
 #[derive(Deserialize, Default)]
@@ -1221,7 +1533,7 @@ async fn retry(State(s): State<App>, h: HeaderMap, Query(q): Query<RetryQuery>) 
         let d = s.data.lock().await;
         let b = d
             .active()
-            .filter(|b| b.status != "ending")
+            .filter(|b| b.status != "ending" && b.live)
             .ok_or_else(|| bad("No hay emisión activa"))?;
         if q.destination_id
             .as_ref()
@@ -1271,7 +1583,7 @@ async fn render_state(State(s): State<App>, Query(q): Query<RenderQuery>) -> Rep
     s.render_access(&q.render_token).await?;
     let d = s.data.lock().await;
     Ok(Json(
-        json!({"program":d.program_for(q.format),"format":q.format,"assets":d.assets.values().collect::<Vec<_>>(),"server_time_ms":now_ms(),"names":d.participants.values().map(|p|(p.id.clone(),p.name.clone())).chain(std::iter::once(("host".into(),"Anfitrión".into()))).collect::<std::collections::BTreeMap<_,_>>()}),
+        json!({"program":d.program_for(q.format),"format":q.format,"assets":d.assets.values().collect::<Vec<_>>(),"server_time_ms":now_ms(),"slates":d.slates,"active_slate":d.active_slate,"names":d.participants.values().map(|p|(p.id.clone(),p.name.clone())).chain(std::iter::once(("host".into(),"Anfitrión".into()))).collect::<std::collections::BTreeMap<_,_>>()}),
     ))
 }
 #[derive(Deserialize)]
@@ -1385,7 +1697,80 @@ async fn render_ack(State(s): State<App>, h: HeaderMap, Json(body): Json<Ack>) -
 async fn recordings(State(s): State<App>, h: HeaderMap) -> Reply {
     s.admin(&h)?;
     let d = s.data.lock().await;
-    Ok(Json(json!(d.recordings.iter().rev().collect::<Vec<_>>())))
+    let default = std::path::absolute(&s.recordings).unwrap_or_else(|_| s.recordings.clone());
+    let items: Vec<_> = d
+        .recordings
+        .iter()
+        .rev()
+        .map(|r| {
+            let mut item = json!(r);
+            item["location"] = json!(r.path(&default).display().to_string());
+            item
+        })
+        .collect();
+    Ok(Json(json!(items)))
+}
+fn recordings_location(s: &App, d: &Data) -> Value {
+    let absolute = |p: &std::path::Path| {
+        std::path::absolute(p)
+            .unwrap_or_else(|_| p.to_owned())
+            .display()
+            .to_string()
+    };
+    let current = s.recordings_dir(d);
+    json!({
+        "path": absolute(&current),
+        "default_path": absolute(&s.recordings),
+        "is_default": d.recordings_dir.is_none(),
+        "editable": s.engine.independent_services(),
+        "locked": d.active().is_some_and(|b| b.recording),
+        "available": current.is_dir(),
+        "free_bytes": fs2::available_space(&current).ok(),
+    })
+}
+async fn recordings_location_get(State(s): State<App>, h: HeaderMap) -> Reply {
+    s.admin(&h)?;
+    let d = s.data.lock().await;
+    Ok(Json(recordings_location(&s, &d)))
+}
+#[derive(Deserialize)]
+struct RecordingsLocationBody {
+    /// Sin valor vuelve a la carpeta predeterminada.
+    path: Option<String>,
+}
+async fn recordings_location_put(
+    State(s): State<App>,
+    h: HeaderMap,
+    Json(body): Json<RecordingsLocationBody>,
+) -> Reply {
+    s.admin(&h)?;
+    let _guard = s.operations.lock().await;
+    if !s.engine.independent_services() {
+        return Err(bad("La carpeta la define el despliegue de este servidor"));
+    }
+    let mut d = s.data.lock().await;
+    if d.active().is_some_and(|b| b.recording) {
+        return Err(bad("Detén la grabación para cambiar la carpeta"));
+    }
+    let chosen = body
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
+    if let Some(dir) = &chosen {
+        if !dir.is_absolute() {
+            return Err(bad("Indica la ruta completa de la carpeta"));
+        }
+        prepare_recordings_dir(dir)?;
+    }
+    let default = std::path::absolute(&s.recordings).unwrap_or_else(|_| s.recordings.clone());
+    d.recordings_dir = chosen
+        .filter(|dir| *dir != default)
+        .map(|dir| dir.display().to_string());
+    s.persist(&mut d)?;
+    s.monitor.watch_disk(s.recordings_dir(&d));
+    Ok(Json(recordings_location(&s, &d)))
 }
 async fn recording_download(
     State(s): State<App>,
@@ -1393,7 +1778,7 @@ async fn recording_download(
     Path(id): Path<String>,
 ) -> Result<Response, Error> {
     s.admin(&h)?;
-    let filename = {
+    let (filename, path) = {
         let d = s.data.lock().await;
         let r = d
             .recordings
@@ -1403,9 +1788,8 @@ async fn recording_download(
         if r.status != "complete" {
             return Err(bad("La grabación no está finalizada"));
         }
-        r.filename.clone()
+        (r.filename.clone(), r.path(&s.recordings))
     };
-    let path = s.recordings.join(&filename);
     let req = Request::builder()
         .uri("/")
         .body(axum::body::Body::empty())
@@ -1433,13 +1817,10 @@ async fn recording_delete(State(s): State<App>, h: HeaderMap, Path(id): Path<Str
         .iter()
         .find(|r| r.id == id)
         .ok_or_else(|| bad("Grabación inexistente"))?;
-    if d.active()
-        .is_some_and(|b| b.id == id || format!("{}-portrait", b.id) == id)
-    {
+    if r.status == "recording" && d.active().is_some_and(|b| r.belongs_to(&b.id)) {
         return Err(bad("Grabación todavía activa"));
     }
-    let path = s.recordings.join(&r.filename);
-    match tokio::fs::remove_file(path).await {
+    match tokio::fs::remove_file(r.path(&s.recordings)).await {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(Error::from(anyhow::Error::new(e))),
@@ -1675,25 +2056,26 @@ fn apply_egress(d: &mut Data, active: &Broadcast, info: &Value, recordings: &std
     b.error = if status == "error" {
         Some("El compositor finalizó con error; revisa sus registros".into())
     } else if status == "reconnecting" {
-        Some("Hay salidas sin señal; las demás salidas y la grabación continúan. Revisa los destinos.".into())
+        Some(if b.recording {
+            "Hay salidas sin señal; las demás salidas y la grabación continúan. Revisa los destinos.".into()
+        } else {
+            "Hay salidas sin señal; las demás salidas continúan. Revisa los destinos.".into()
+        })
     } else {
         None
     };
     if matches!(status.as_str(), "complete" | "error") {
         b.ended = Some(now());
+        d.active_slate = None;
     }
-    for r in d
-        .recordings
-        .iter_mut()
-        .filter(|r| r.id == active.id || r.id == format!("{}-portrait", active.id))
-    {
+    for r in d.recordings.iter_mut().filter(|r| r.belongs_to(&active.id)) {
         let recording = info["recording_results"]
             .as_array()
             .and_then(|results| results.iter().find(|f| f["id"] == r.id));
         let record_status = recording
             .and_then(|r| r["status"].as_str())
             .unwrap_or(&status);
-        if record_status == "complete" || record_status == "error" {
+        if r.status == "recording" && (record_status == "complete" || record_status == "error") {
             r.status = if record_status == "complete" {
                 "complete"
             } else {
@@ -1701,7 +2083,7 @@ fn apply_egress(d: &mut Data, active: &Broadcast, info: &Value, recordings: &std
             }
             .into();
         }
-        if let Ok(meta) = std::fs::metadata(recordings.join(&r.filename)) {
+        if let Ok(meta) = std::fs::metadata(r.path(recordings)) {
             r.bytes = meta.len();
         } else if record_status == "complete" {
             r.status = "missing".into();
@@ -1720,6 +2102,19 @@ fn apply_egress(d: &mut Data, active: &Broadcast, info: &Value, recordings: &std
 }
 async fn reconcile(s: &App) -> anyhow::Result<()> {
     let _guard = s.operations.lock().await;
+    // Respaldo del temporizador: la tarea programada se pierde si el servidor se reinicia.
+    let expired = s
+        .data
+        .lock()
+        .await
+        .active_slate
+        .clone()
+        .filter(|a| a.ends_at_ms.is_some_and(|end| end <= now_ms()));
+    if let Some(expired) = expired
+        && let Err(e) = finish_slate_timer(s, &expired).await
+    {
+        tracing::warn!("no se pudo aplicar el fin del temporizador: {}", e.1);
+    }
     let active = {
         let d = s.data.lock().await;
         d.active().cloned()
@@ -1761,8 +2156,13 @@ async fn reconcile(s: &App) -> anyhow::Result<()> {
                 let state = info.as_ref().map(|i| egress_status(&i["status"])).unwrap_or(if expired { "error" } else { "starting" });
                 states.push(state);
                 if let Some(info) = info { streams.extend(info["stream_results"].as_array().cloned().unwrap_or_default()); }
-                let duration = info.as_ref().and_then(|i| i["file_results"].as_array()).and_then(|x| x.first()).map(|f| f["duration"].clone()).unwrap_or(Value::Null);
-                recordings.push(json!({"id":rid,"status":state,"duration":duration}));
+                // El motor local informa de cada grabación; Egress tiene como mucho una por compositor.
+                if let Some(results) = info.as_ref().and_then(|i| i["recording_results"].as_array()) {
+                    recordings.extend(results.iter().cloned());
+                } else if active.recording {
+                    let duration = info.as_ref().and_then(|i| i["file_results"].as_array()).and_then(|x| x.first()).map(|f| f["duration"].clone()).unwrap_or(Value::Null);
+                    recordings.push(json!({"id":rid,"status":state,"duration":duration}));
+                }
             }
             let terminal = states.iter().all(|s| matches!(*s,"complete"|"error"));
             let status = if terminal { if states.contains(&"error") { "EGRESS_FAILED" } else { "EGRESS_COMPLETE" } }
@@ -1779,7 +2179,7 @@ async fn reconcile(s: &App) -> anyhow::Result<()> {
             let destination_statuses: std::collections::BTreeMap<_, _> = d
                 .destinations
                 .iter()
-                .filter(|x| x.enabled)
+                .filter(|x| x.enabled && active.live)
                 .map(|x| {
                     let state = unseal(&s.master, &x.sealed)
                         .ok()
@@ -1806,20 +2206,29 @@ async fn reconcile(s: &App) -> anyhow::Result<()> {
             b.status = "error".into();
             b.ended = Some(now());
             b.error = Some("No se encontró un compositor activo".into());
+            d.active_slate = None;
             for r in d
                 .recordings
                 .iter_mut()
-                .filter(|r| r.id == active.id || r.id == format!("{}-portrait", active.id))
+                .filter(|r| r.status == "recording" && r.belongs_to(&active.id))
             {
                 r.status = "interrupted".into();
             }
             s.persist(&mut d)?;
         }
         drop(d);
-        if (!s.engine.is_local() && now().saturating_sub(active.created) >= 7200)
-            || fs2::available_space(&s.recordings)? < 1_000_000_000
-        {
+        if !s.engine.is_local() && now().saturating_sub(active.created) >= 7200 {
             let _ = stop_inner(s).await;
+        } else if active.recording
+            && fs2::available_space(s.recordings_dir(&*s.data.lock().await))
+                .is_ok_and(|free| free < 1_000_000_000)
+        {
+            // Sin disco solo se detiene la grabación: el directo no escribe archivos.
+            if s.engine.independent_services() {
+                let _ = stop_recording_service(s).await;
+            } else {
+                let _ = stop_inner(s).await;
+            }
         }
     }
     let response =
@@ -1981,13 +2390,25 @@ fn router(s: App) -> Router {
         .route("/api/v1/broadcast/retry", post(retry))
         .route("/api/v1/scenes", post(scene_save))
         .route("/api/v1/scenes/{id}/activate", post(scene_activate))
-        .route("/api/v1/scenes/{id}", delete(scene_remove))
+        .route(
+            "/api/v1/scenes/{id}",
+            delete(scene_remove).put(scene_update),
+        )
         .route("/api/v1/renderer/state", get(render_state))
         .route("/api/v1/renderer/ack", post(render_ack))
         .route("/api/v1/renderer/session", get(render_session))
         .route("/api/v1/resources", get(resources))
         .route("/api/v1/desktop/renderer", get(desktop_renderer))
         .route("/api/v1/ingest", get(ingest))
+        .route(
+            "/api/v1/settings/recordings",
+            get(recordings_location_get).put(recordings_location_put),
+        )
+        .route("/api/v1/slates/hide", post(slate_hide))
+        .route("/api/v1/slates/{kind}", put(slate_update))
+        .route("/api/v1/slates/{kind}/show", post(slate_show))
+        .route("/api/v1/recording/start", post(recording_start))
+        .route("/api/v1/recording/stop", post(recording_stop))
         .route("/api/v1/recordings", get(recordings))
         .route(
             "/api/v1/recordings/{id}",
@@ -2076,6 +2497,12 @@ async fn main() -> anyhow::Result<()> {
     let origin = env("PUBLIC_ORIGIN", "http://localhost:5173");
     let data = store.load()?;
     let mut data = data;
+    // Al arrancar no hay ninguna sesión viva que siga mostrando una pantalla.
+    data.active_slate = None;
+    let watched_disk = data
+        .recordings_dir
+        .as_ref()
+        .map_or_else(|| recordings.clone(), PathBuf::from);
     if data.migrate_legacy_destination(id()) {
         store.save(&data)?;
     }
@@ -2111,7 +2538,7 @@ async fn main() -> anyhow::Result<()> {
             std::env::var("STREAMHIVE_APP_PID")
                 .ok()
                 .and_then(|p| p.parse().ok()),
-            recordings.clone(),
+            watched_disk,
         ),
         desktop_token_hash: Some(env("DESKTOP_AUTOLOGIN_TOKEN", ""))
             .filter(|t| t.len() >= 32)
@@ -2121,10 +2548,7 @@ async fn main() -> anyhow::Result<()> {
         desktop_renderer: Default::default(),
         remote: Default::default(),
         engine: match env("ENGINE", "egress").as_str() {
-            "ffmpeg" => output::Engine::Ffmpeg(output::Ffmpeg::new(
-                env("FFMPEG_BIN", "ffmpeg"),
-                PathBuf::from(env("RECORDINGS_DIR", "/recordings")),
-            )),
+            "ffmpeg" => output::Engine::Ffmpeg(output::Ffmpeg::new(env("FFMPEG_BIN", "ffmpeg"))),
             "egress" => output::Engine::Egress(lk.clone()),
             other => anyhow::bail!("ENGINE desconocido: {other} (usa egress o ffmpeg)"),
         },
@@ -2723,6 +3147,8 @@ mod api_tests {
             outputs: Default::default(),
             destination_statuses: Default::default(),
             renderer_revisions: Default::default(),
+            live: true,
+            recording: true,
         });
         assert_eq!(
             patch(json!({"enabled":true})).await.0,
@@ -2834,6 +3260,8 @@ mod api_tests {
             outputs: Default::default(),
             destination_statuses: Default::default(),
             renderer_revisions: Default::default(),
+            live: true,
+            recording: true,
         });
         let bad = call(
             &s,
@@ -3085,7 +3513,7 @@ mod api_tests {
         let dir = std::env::temp_dir().join(format!("sh-ingest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut s = app();
-        s.engine = output::Engine::Ffmpeg(output::Ffmpeg::new("ffmpeg", dir.clone()));
+        s.engine = output::Engine::Ffmpeg(output::Ffmpeg::new("ffmpeg"));
         s.data.lock().await.broadcasts.push(Broadcast {
             id: "b1".into(),
             egress_id: None,
@@ -3098,9 +3526,15 @@ mod api_tests {
             outputs: Default::default(),
             destination_statuses: Default::default(),
             renderer_revisions: Default::default(),
+            live: true,
+            recording: true,
         });
         s.engine
             .start(output::StartParams {
+                record: Some(output::RecordingTarget {
+                    id: "b1",
+                    dir: &dir,
+                }),
                 broadcast_id: "b1",
                 render_url: "",
                 destinations: &[],
@@ -3163,6 +3597,8 @@ mod api_tests {
                 outputs: Default::default(),
                 destination_statuses: Default::default(),
                 renderer_revisions: Default::default(),
+                live: true,
+                recording: true,
             });
         }
         assert_eq!(
@@ -3268,6 +3704,8 @@ mod api_tests {
                 outputs: Default::default(),
                 destination_statuses: Default::default(),
                 renderer_revisions: Default::default(),
+                live: true,
+                recording: true,
             });
         }
         for _ in 0..2 {
@@ -3316,6 +3754,205 @@ mod api_tests {
         assert_eq!(s.data.lock().await.program.layout, Layout::Grid);
     }
     #[tokio::test]
+    async fn live_and_recording_are_independent_services() {
+        let dir = std::env::temp_dir().join(format!("sh-services-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = app();
+        s.recordings = dir.clone();
+        s.engine = output::Engine::Ffmpeg(output::Ffmpeg::new("ffmpeg"));
+        let admin = Some(("host", "admin"));
+        let post = |path: &'static str| {
+            let s = s.clone();
+            async move { call(&s, "POST", path, admin, Value::Null).await }
+        };
+        // Grabar no necesita destinos; emitir sí.
+        assert_eq!(post("/api/v1/recording/start").await.0, StatusCode::OK);
+        {
+            let d = s.data.lock().await;
+            let b = d.active().unwrap();
+            assert!(b.recording && !b.live);
+            assert_eq!(d.recordings.len(), 1);
+        }
+        assert_eq!(
+            post("/api/v1/broadcast/start").await.0,
+            StatusCode::BAD_REQUEST
+        );
+        // Detener la grabación, único servicio activo, termina la sesión.
+        assert_eq!(post("/api/v1/recording/stop").await.0, StatusCode::OK);
+        assert_eq!(s.data.lock().await.active().unwrap().status, "ending");
+        s.data.lock().await.broadcasts.clear();
+        s.data.lock().await.recordings.clear();
+
+        call(
+            &s,
+            "POST",
+            "/api/v1/destinations",
+            admin,
+            json!({"platform":"custom","name":"Sink","url":"rtmp://127.0.0.1:1/live","key":"k"}),
+        )
+        .await;
+        // Iniciar el directo no graba.
+        assert_eq!(post("/api/v1/broadcast/start").await.0, StatusCode::OK);
+        {
+            let d = s.data.lock().await;
+            let b = d.active().unwrap();
+            assert!(b.live && !b.recording);
+            assert!(d.recordings.is_empty());
+        }
+        // Grabar a mitad del directo, detenerlo y volver a grabar sin cortar la emisión.
+        let bid = s.data.lock().await.active().unwrap().id.clone();
+        assert_eq!(post("/api/v1/recording/start").await.0, StatusCode::OK);
+        assert_eq!(post("/api/v1/recording/stop").await.0, StatusCode::OK);
+        {
+            let d = s.data.lock().await;
+            let b = d.active().unwrap();
+            assert!(b.live && !b.recording && b.status != "ending");
+        }
+        assert_eq!(post("/api/v1/recording/start").await.0, StatusCode::OK);
+        {
+            let d = s.data.lock().await;
+            let ids: Vec<_> = d.recordings.iter().map(|r| r.id.clone()).collect();
+            assert_eq!(ids, [bid.clone(), format!("{bid}-r2")]);
+        }
+        // Cortar el directo conserva la grabación y la misma sesión; se puede volver a emitir.
+        assert_eq!(post("/api/v1/broadcast/stop").await.0, StatusCode::OK);
+        {
+            let d = s.data.lock().await;
+            let b = d.active().unwrap();
+            assert!(!b.live && b.recording && b.id == bid && b.status != "ending");
+        }
+        assert_eq!(post("/api/v1/broadcast/start").await.0, StatusCode::OK);
+        assert!(s.data.lock().await.active().unwrap().live);
+        // Con ambos activos, finalizar todo cierra la sesión.
+        assert_eq!(
+            post("/api/v1/broadcast/stop?all=true").await.0,
+            StatusCode::OK
+        );
+        assert_eq!(s.data.lock().await.active().unwrap().status, "ending");
+        std::fs::remove_dir_all(dir).ok();
+    }
+    #[tokio::test]
+    async fn recordings_use_the_chosen_folder_and_older_ones_stay_where_they_are() {
+        let base = std::env::temp_dir().join(format!("sh-location-{}", id()));
+        let default = base.join("default");
+        let chosen = base.join("nested/chosen");
+        std::fs::create_dir_all(&default).unwrap();
+        let mut s = app();
+        s.recordings = default.clone();
+        s.engine = output::Engine::Ffmpeg(output::Ffmpeg::new("ffmpeg"));
+        let admin = Some(("host", "admin"));
+        let settings = "/api/v1/settings/recordings";
+        // La ubicación predeterminada se ve sin configurar nada.
+        let (c, _, v) = call(&s, "GET", settings, admin, Value::Null).await;
+        assert_eq!(c, StatusCode::OK);
+        assert_eq!(v["path"], default.display().to_string());
+        assert_eq!(v["default_path"], default.display().to_string());
+        assert_eq!(v["is_default"], true);
+        // Los invitados no pueden ver ni cambiar rutas del equipo.
+        let guest = Some(("guest", "guest"));
+        assert_ne!(
+            call(&s, "GET", settings, guest, Value::Null).await.0,
+            StatusCode::OK
+        );
+        let (c, ..) = call(&s, "PUT", settings, guest, json!({"path":"/tmp/x"})).await;
+        assert_ne!(c, StatusCode::OK);
+        assert!(s.data.lock().await.recordings_dir.is_none());
+        // Una ruta relativa o sobre un archivo se rechaza sin cambiar nada.
+        let (c, ..) = call(&s, "PUT", settings, admin, json!({"path":"videos"})).await;
+        assert_eq!(c, StatusCode::BAD_REQUEST);
+        let file = base.join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let (c, ..) = call(&s, "PUT", settings, admin, json!({"path":file})).await;
+        assert_eq!(c, StatusCode::BAD_REQUEST);
+        assert!(s.data.lock().await.recordings_dir.is_none());
+        // Una grabación previa sigue en la carpeta donde se creó.
+        std::fs::write(default.join("old.mp4"), b"old").unwrap();
+        s.data.lock().await.recordings.push(Recording {
+            id: "old".into(),
+            session: "old".into(),
+            directory: None,
+            filename: "old.mp4".into(),
+            created: now(),
+            status: "complete".into(),
+            bytes: 3,
+            duration: 1.0,
+        });
+        // La carpeta elegida se crea si falta y no quedan archivos de prueba.
+        let (c, _, v) = call(&s, "PUT", settings, admin, json!({"path":chosen})).await;
+        assert_eq!(c, StatusCode::OK, "{v}");
+        assert_eq!(v["path"], chosen.display().to_string());
+        assert_eq!(v["is_default"], false);
+        assert_eq!(std::fs::read_dir(&chosen).unwrap().count(), 0);
+        // La grabación nueva va a la carpeta elegida y la carpeta queda bloqueada.
+        let (c, ..) = call(&s, "POST", "/api/v1/recording/start", admin, Value::Null).await;
+        assert_eq!(c, StatusCode::OK);
+        let (bid, stored) = {
+            let d = s.data.lock().await;
+            let r = d.recordings.last().unwrap();
+            (d.active().unwrap().id.clone(), r.path(&s.recordings))
+        };
+        assert_eq!(stored, chosen.join(format!("{bid}.mp4")));
+        let (c, ..) = call(&s, "PUT", settings, admin, json!({"path":default})).await;
+        assert_eq!(c, StatusCode::BAD_REQUEST);
+        let (_, _, list) = call(&s, "GET", "/api/v1/recordings", admin, Value::Null).await;
+        assert_eq!(
+            list[1]["location"],
+            default.join("old.mp4").display().to_string()
+        );
+        assert_eq!(list[0]["location"], stored.display().to_string());
+        let (c, ..) = call(&s, "POST", "/api/v1/recording/stop", admin, Value::Null).await;
+        assert_eq!(c, StatusCode::OK);
+        s.data.lock().await.broadcasts.clear();
+        // Elegir la predeterminada equivale a restablecerla; borrar usa la ruta original.
+        let (c, _, v) = call(&s, "PUT", settings, admin, json!({"path":default})).await;
+        assert_eq!(c, StatusCode::OK);
+        assert_eq!(v["is_default"], true);
+        let (c, ..) = call(&s, "DELETE", "/api/v1/recordings/old", admin, Value::Null).await;
+        assert_eq!(c, StatusCode::OK);
+        assert!(!default.join("old.mp4").exists());
+        // Una carpeta elegida que ya no sirve da error: nunca se graba en otra sin avisar.
+        s.data.lock().await.recordings_dir = Some(file.join("sub").display().to_string());
+        let (c, _, v) = call(&s, "POST", "/api/v1/recording/start", admin, Value::Null).await;
+        assert_eq!(c, StatusCode::BAD_REQUEST, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("No se puede guardar"));
+        assert!(s.data.lock().await.active().is_none());
+        std::fs::remove_dir_all(base).ok();
+    }
+    #[tokio::test]
+    async fn egress_refuses_to_change_services_during_a_session() {
+        let s = app();
+        s.data.lock().await.broadcasts.push(Broadcast {
+            id: "b".into(),
+            egress_id: Some("e".into()),
+            status: "live".into(),
+            created: now(),
+            ended: None,
+            error: None,
+            renderer_hash: String::new(),
+            renderer_revision: None,
+            outputs: [("landscape".to_string(), "e".to_string())].into(),
+            destination_statuses: Default::default(),
+            renderer_revisions: Default::default(),
+            live: true,
+            recording: false,
+        });
+        let (status, _, body) = call(
+            &s,
+            "POST",
+            "/api/v1/recording/start",
+            Some(("host", "admin")),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("finaliza la sesión")
+        );
+    }
+    #[tokio::test]
     async fn active_recording_cannot_be_deleted() {
         let s = app();
         {
@@ -3332,9 +3969,13 @@ mod api_tests {
                 outputs: Default::default(),
                 destination_statuses: Default::default(),
                 renderer_revisions: Default::default(),
+                live: true,
+                recording: true,
             });
             d.recordings.push(Recording {
                 id: "active".into(),
+                session: String::new(),
+                directory: None,
                 filename: "active.mp4".into(),
                 created: now(),
                 status: "recording".into(),
@@ -3466,6 +4107,8 @@ mod api_tests {
                 outputs: Default::default(),
                 destination_statuses: Default::default(),
                 renderer_revisions: Default::default(),
+                live: true,
+                recording: true,
             });
         }
         assert_eq!(
@@ -3571,6 +4214,317 @@ mod api_tests {
         assert_eq!(groups[0].0, OutputFormat::Portrait);
         assert!(groups[0].1[0].ends_with("/new-secret"));
         assert!(!format!("{:?}", d.destinations).contains("new-secret"));
+    }
+    #[tokio::test]
+    async fn slates_are_admin_only_validated_and_stay_out_of_scenes() {
+        let s = app();
+        let admin = Some(("host", "admin"));
+        let guest = Some(("guest", "guest"));
+        let (_, _, studio) = call(&s, "GET", "/api/v1/studio", admin, Value::Null).await;
+        assert_eq!(studio["slates"]["start"]["timer_seconds"], 300);
+        assert_eq!(studio["slates"]["start"]["show_on_go_live"], true);
+        assert_eq!(studio["slates"]["end"]["timer_seconds"], 0);
+        assert!(studio["active_slate"].is_null());
+        let show = "/api/v1/slates/pause/show";
+        assert_ne!(
+            call(&s, "POST", show, guest, Value::Null).await.0,
+            StatusCode::OK
+        );
+        assert_ne!(
+            call(
+                &s,
+                "PUT",
+                "/api/v1/slates/pause",
+                guest,
+                json!({"title":"x"})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                &s,
+                "PUT",
+                "/api/v1/slates/otra",
+                admin,
+                json!({"title":"x"})
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        for invalid in [
+            json!({"title":""}),
+            json!({"title":"x".repeat(61)}),
+            json!({"title":"dos\nlíneas"}),
+            json!({"title":"x","background":"red"}),
+            json!({"title":"x","timer_seconds":21601}),
+            json!({"title":"x","music_volume":2.0}),
+            json!({"title":"x","background_asset":"none"}),
+            json!({"title":"x","music_asset":"none"}),
+        ] {
+            let (c, ..) = call(&s, "PUT", "/api/v1/slates/pause", admin, invalid.clone()).await;
+            assert_eq!(c, StatusCode::BAD_REQUEST, "{invalid}");
+        }
+        assert_eq!(s.data.lock().await.slates.pause.title, "Volvemos enseguida");
+        let (c, _, saved) = call(
+            &s,
+            "PUT",
+            "/api/v1/slates/pause",
+            admin,
+            json!({"title":"Un momento","background":"#112233","timer_seconds":60}),
+        )
+        .await;
+        assert_eq!(c, StatusCode::OK);
+        assert_eq!(saved["title"], "Un momento");
+        // Mostrar una pantalla no toca el programa ni se guarda en las escenas.
+        let revision = s.data.lock().await.program.revision;
+        assert_eq!(
+            call(&s, "POST", show, admin, Value::Null).await.0,
+            StatusCode::OK
+        );
+        {
+            let d = s.data.lock().await;
+            let active = d.active_slate.as_ref().unwrap();
+            assert_eq!(active.kind, SlateKind::Pause);
+            assert_eq!(active.ends_at_ms, Some(active.started_at_ms + 60_000));
+            assert_eq!(d.program.revision, revision);
+        }
+        let (_, _, scene) = call(
+            &s,
+            "POST",
+            "/api/v1/scenes",
+            admin,
+            json!({"name":"Con pausa","format":"landscape"}),
+        )
+        .await;
+        assert!(scene["program"].get("active_slate").is_none());
+        assert_eq!(
+            call(&s, "POST", "/api/v1/slates/hide", admin, Value::Null)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert!(s.data.lock().await.active_slate.is_none());
+        // Datos anteriores a esta función cargan con los valores por defecto.
+        let mut old = json!(Data::default());
+        let fields = old.as_object_mut().unwrap();
+        fields.remove("slates");
+        fields.remove("active_slate");
+        let old: Data = serde_json::from_value(old).unwrap();
+        assert_eq!(old.slates.end.title, "Gracias por acompañarnos");
+        assert!(old.active_slate.is_none());
+    }
+    #[tokio::test]
+    async fn the_timer_only_acts_when_automatic_and_on_the_same_slate() {
+        let s = app();
+        let active = ActiveSlate {
+            kind: SlateKind::Pause,
+            started_at_ms: 1,
+            ends_at_ms: Some(2),
+        };
+        s.data.lock().await.active_slate = Some(active.clone());
+        // Manual por defecto: la pantalla se queda.
+        finish_slate_timer(&s, &active).await.unwrap();
+        assert!(s.data.lock().await.active_slate.is_some());
+        s.data.lock().await.slates.pause.auto_on_timer_end = true;
+        // Un temporizador antiguo no retira otra pantalla mostrada después.
+        let later = ActiveSlate {
+            started_at_ms: 99,
+            ..active.clone()
+        };
+        s.data.lock().await.active_slate = Some(later);
+        finish_slate_timer(&s, &active).await.unwrap();
+        assert!(s.data.lock().await.active_slate.is_some());
+        s.data.lock().await.active_slate = Some(active.clone());
+        finish_slate_timer(&s, &active).await.unwrap();
+        assert!(s.data.lock().await.active_slate.is_none());
+    }
+    #[tokio::test]
+    async fn going_live_shows_the_start_slate_and_automatic_end_finishes_the_session() {
+        let dir = std::env::temp_dir().join(format!("sh-slates-{}", id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = app();
+        s.recordings = dir.clone();
+        s.engine = output::Engine::Ffmpeg(output::Ffmpeg::new("ffmpeg"));
+        let admin = Some(("host", "admin"));
+        call(
+            &s,
+            "POST",
+            "/api/v1/destinations",
+            admin,
+            json!({"platform":"custom","name":"Sink","url":"rtmp://127.0.0.1:1/live","key":"k"}),
+        )
+        .await;
+        // Solo grabar no pone la pantalla de inicio.
+        call(&s, "POST", "/api/v1/recording/start", admin, Value::Null).await;
+        assert!(s.data.lock().await.active_slate.is_none());
+        call(&s, "POST", "/api/v1/recording/stop", admin, Value::Null).await;
+        s.data.lock().await.broadcasts.clear();
+        call(&s, "POST", "/api/v1/broadcast/start", admin, Value::Null).await;
+        assert_eq!(
+            s.data.lock().await.active_slate.as_ref().unwrap().kind,
+            SlateKind::Start
+        );
+        // Fin automático: cierra la sesión y la pantalla sigue hasta que termina.
+        s.data.lock().await.slates.end.auto_on_timer_end = true;
+        let end = ActiveSlate {
+            kind: SlateKind::End,
+            started_at_ms: 5,
+            ends_at_ms: Some(6),
+        };
+        s.data.lock().await.active_slate = Some(end.clone());
+        finish_slate_timer(&s, &end).await.unwrap();
+        {
+            let d = s.data.lock().await;
+            assert_eq!(d.active().unwrap().status, "ending");
+            assert!(d.active_slate.is_some());
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+    #[tokio::test]
+    async fn slate_assets_are_protected_and_readable_by_the_renderer() {
+        let s = app();
+        let admin = Some(("host", "admin"));
+        {
+            let mut d = s.data.lock().await;
+            for (id, kind, mime) in [
+                ("song", "audio", "audio/mpeg"),
+                ("wall", "image", "image/png"),
+            ] {
+                d.assets.insert(
+                    id.into(),
+                    Asset {
+                        id: id.into(),
+                        name: id.into(),
+                        filename: format!("{id}.bin"),
+                        mime: mime.into(),
+                        kind: kind.into(),
+                        bytes: 1,
+                        created: now(),
+                    },
+                );
+            }
+        }
+        // Cada tipo de archivo solo sirve para lo suyo.
+        let (c, ..) = call(
+            &s,
+            "PUT",
+            "/api/v1/slates/start",
+            admin,
+            json!({"title":"x","music_asset":"wall"}),
+        )
+        .await;
+        assert_eq!(c, StatusCode::BAD_REQUEST);
+        let (c, ..) = call(
+            &s,
+            "PUT",
+            "/api/v1/slates/start",
+            admin,
+            json!({"title":"x","background_asset":"song"}),
+        )
+        .await;
+        assert_eq!(c, StatusCode::BAD_REQUEST);
+        let mut program = s.data.lock().await.program.clone();
+        program.layout = Layout::Screen;
+        program.media_asset = Some("song".into());
+        assert_eq!(
+            call(&s, "PUT", "/api/v1/program", admin, json!(program))
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        let (c, ..) = call(
+            &s,
+            "PUT",
+            "/api/v1/slates/start",
+            admin,
+            json!({"title":"x","music_asset":"song","background_asset":"wall"}),
+        )
+        .await;
+        assert_eq!(c, StatusCode::OK);
+        // No se pueden borrar mientras una pantalla los use.
+        for id in ["song", "wall"] {
+            let (c, _, body) = call(
+                &s,
+                "DELETE",
+                &format!("/api/v1/assets/{id}"),
+                admin,
+                Value::Null,
+            )
+            .await;
+            assert_eq!(c, StatusCode::BAD_REQUEST);
+            assert!(body["error"].as_str().unwrap().contains("pantalla"));
+        }
+        // El compositor accede a ellos y a nada más.
+        s.data.lock().await.broadcasts.push(Broadcast {
+            id: "b".into(),
+            egress_id: None,
+            status: "live".into(),
+            created: now(),
+            ended: None,
+            error: None,
+            renderer_hash: hash("renderer-token"),
+            renderer_revision: None,
+            outputs: Default::default(),
+            destination_statuses: Default::default(),
+            renderer_revisions: Default::default(),
+            live: true,
+            recording: false,
+        });
+        s.data.lock().await.assets.insert(
+            "other".into(),
+            Asset {
+                id: "other".into(),
+                name: "other".into(),
+                filename: "other.bin".into(),
+                mime: "image/png".into(),
+                kind: "image".into(),
+                bytes: 1,
+                created: now(),
+            },
+        );
+        let path = |id: &str| format!("/api/v1/assets/{id}?render_token=renderer-token");
+        assert_ne!(
+            call(&s, "GET", &path("song"), None, Value::Null).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&s, "GET", &path("other"), None, Value::Null).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    #[tokio::test]
+    async fn a_scene_can_be_replaced_with_the_current_program() {
+        let s = app();
+        let admin = Some(("host", "admin"));
+        let (_, _, scene) = call(
+            &s,
+            "POST",
+            "/api/v1/scenes",
+            admin,
+            json!({"name":"Entrevista","format":"landscape"}),
+        )
+        .await;
+        let path = format!("/api/v1/scenes/{}", scene["id"].as_str().unwrap());
+        let mut program = s.data.lock().await.program.clone();
+        program.background = "#abcdef".into();
+        let (c, ..) = call(&s, "PUT", "/api/v1/program", admin, json!(program)).await;
+        assert_eq!(c, StatusCode::OK);
+        assert_ne!(s.data.lock().await.scenes[0].program.background, "#abcdef");
+        let guest = Some(("guest", "guest"));
+        assert_ne!(
+            call(&s, "PUT", &path, guest, Value::Null).await.0,
+            StatusCode::OK
+        );
+        let (c, _, updated) = call(&s, "PUT", &path, admin, Value::Null).await;
+        assert_eq!(c, StatusCode::OK);
+        assert_eq!(updated["name"], "Entrevista");
+        assert_eq!(updated["id"], scene["id"]);
+        assert_eq!(s.data.lock().await.scenes[0].program.background, "#abcdef");
+        let missing = call(&s, "PUT", "/api/v1/scenes/none", admin, Value::Null).await;
+        assert_eq!(missing.0, StatusCode::BAD_REQUEST);
     }
     #[tokio::test]
     async fn scenes_keep_formats_and_revisions_independent_and_remove_revoked_guests() {
@@ -3919,11 +4873,15 @@ mod lifecycle_tests {
             outputs: Default::default(),
             destination_statuses: Default::default(),
             renderer_revisions: Default::default(),
+            live: true,
+            recording: true,
         };
         let mut d = Data::default();
         d.broadcasts.push(b.clone());
         d.recordings.push(Recording {
             id: b.id.clone(),
+            session: String::new(),
+            directory: None,
             filename: format!("{}.mp4", id()),
             created: now(),
             status: "recording".into(),

@@ -32,6 +32,7 @@ pub struct Group {
 }
 #[derive(Default)]
 struct State {
+    disk: Option<PathBuf>,
     latest: Option<Sample>,
     history: VecDeque<(u64, f32, f32)>, // t, cpu%, mem%
 }
@@ -44,6 +45,10 @@ fn base(name: &str) -> String {
 }
 
 impl Monitor {
+    /// Disco que se vigila: el de la carpeta de grabaciones elegida.
+    pub fn watch_disk(&self, path: PathBuf) {
+        self.0.lock().unwrap().disk = Some(path);
+    }
     pub fn spawn(app_pid: Option<u32>, recordings: PathBuf) -> Self {
         let m = Monitor::default();
         let state = m.0.clone();
@@ -125,7 +130,10 @@ impl Monitor {
                         cpus,
                         mem_used: sys.used_memory(),
                         mem_total: sys.total_memory(),
-                        disk_free: fs2::available_space(&recordings).unwrap_or(0),
+                        disk_free: fs2::available_space(
+                            state.lock().unwrap().disk.as_ref().unwrap_or(&recordings),
+                        )
+                        .unwrap_or(0),
                         groups,
                     };
                     {

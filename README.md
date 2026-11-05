@@ -8,7 +8,9 @@ Estudio web personal de streaming: backend Rust, interfaz React en español y mo
 - Cámaras, micrófonos, selección de dispositivos y varias pantallas disponibles; una al aire.
 - Cuadrícula, protagonista o pantalla con cámaras, nombres, logo y fondo de escenario.
 - Efectos por participante: desenfoque y fondo de cámara personalizado con prueba privada.
-- Hasta cinco salidas RTMP/RTMPS simultáneas y grabación MP4 por formato activo (16:9 y 9:16).
+- Emisión y grabación como servicios independientes: solo directo, solo grabación o ambos.
+- Carpeta de grabaciones configurable en **Configuración → Grabaciones**; ahí también se ve la predeterminada.
+- Hasta cinco salidas RTMP/RTMPS simultáneas y grabación MP4 opcional por formato activo (16:9 y 9:16).
 - Biblioteca con descarga y borrado manual; configuración RTMP cifrada.
 - Compositor independiente del panel: cerrar el navegador del productor no detiene el directo.
 
@@ -62,7 +64,7 @@ Necesitas Docker Engine con Compose v2, Python 3, una IP pública y tres subdomi
 3. Crea una invitación y envíala a tus invitados. Para probarla tú mismo, usa otro perfil del navegador: las sesiones de anfitrión e invitado usan la misma cookie.
 4. Admite invitados y añade al programa las personas que deben salir al aire. Admitir a alguien no lo incorpora automáticamente al programa.
 5. Selecciona composición y pantalla. El audio de pantalla está desactivado por defecto; en Chrome/Edge, compartir una pestaña permite solicitar su audio.
-6. Pulsa **Iniciar directo** y verifica también la recepción en el panel de la plataforma de destino. StreamHive confirma el estado del motor, no la distribución final de YouTube.
+6. Pulsa **Iniciar directo** (y **Grabar** si también quieres el archivo; el directo no graba por sí solo) y verifica también la recepción en el panel de la plataforma de destino. StreamHive confirma el estado del motor, no la distribución final de YouTube.
 7. Finaliza y espera a que el MP4 aparezca como finalizado antes de descargarlo.
 
 Todos los participantes admitidos pueden conversar entre sí. Solo los micrófonos seleccionados para el programa y el audio de pantalla habilitado se reproducen en el compositor. Se recomienda utilizar auriculares.
@@ -99,7 +101,7 @@ En **Audio**, el control **Micrófonos en programa** permite retirarlos del audi
 - Salida 1080p30, video a 6 Mbps y audio a 160 kbps: aproximadamente 6 GB por dos horas. Puedes ajustar `VIDEO_BITRATE_KBPS` (1000–12000) y `AUDIO_BITRATE_KBPS` (64–320) en `.env` y recrear backend; la reserva inicial de disco aumenta con el bitrate.
 - Se finaliza automáticamente al alcanzar dos horas desde la solicitud de inicio o al bajar de 1 GB libre. El control se ejecuta cada cinco segundos mientras LiveKit responde.
 - Las operaciones de inicio/parada están serializadas. Un inicio ambiguo bloquea otro mientras se consulta Egress; se recupera por identificador o por el nombre único del archivo solicitado.
-- Si el destino RTMP falla, se mantiene la grabación cuando Egress sigue operativo y el panel permite reintentar la salida.
+- Si el destino RTMP falla y hay una grabación activa, esta se mantiene mientras el motor siga operativo; el panel permite reintentar la salida.
 - Reiniciar backend conserva el directo y recupera su estado. Un fallo de Egress puede dejar un MP4 incompleto: se marca interrumpido y se conserva el archivo; la aplicación no garantiza repararlo ni ofrece descargarlo como si estuviera finalizado.
 - Si el compositor pierde acceso al estado del programa, deja de reproducir pistas y muestra un fondo neutro, evitando mantener una selección obsoleta al aire. Puede continuar brevemente el contenido anterior hasta que venza la petición de estado de 1,5 segundos.
 
@@ -171,13 +173,13 @@ La calidad de cámara y de audio se elige ya en **Probar cámara y micrófono** 
 
 En **Configuración → Destinos de transmisión** se añaden hasta **5 destinos simultáneos**. Plataformas: YouTube, Twitch, Facebook, Kick, X, Instagram, TikTok, LinkedIn y Personalizado. YouTube, Twitch y Facebook incluyen servidor predeterminado; puedes sustituirlo por el que indique el panel de la plataforma. Los demás requieren URL y clave. Cada destino permite elegir **16:9 (1920×1080)** o **9:16 (1080×1920)** y editar nombre, servidor, clave y formato con el directo parado. Las credenciales se cifran con `MASTER_KEY` y nunca vuelven a mostrarse.
 
-En el estudio, **Composición** cambia entre el programa horizontal y el vertical, que tienen cámaras, contenido, fondo y revisiones independientes. Puedes copiar una composición a la otra, guardar hasta **20 escenas** y llevar una escena guardada al programa, también durante el directo. Al retirar un participante, se elimina de ambos programas y de las escenas guardadas. Los archivos utilizados por cualquiera de ellos quedan protegidos contra borrado.
+En el estudio, **Composición** cambia entre el programa horizontal y el vertical, que tienen cámaras, contenido, fondo y revisiones independientes. Puedes copiar una composición a la otra, guardar hasta **20 escenas** y volver a cualquiera con **Usar escena**, también durante el directo (el público ve el cambio al instante). Cada escena guarda cámaras, diseño, contenido, logo y fondo; el panel muestra un esquema y un resumen de cada una, y **Actualizar** la reemplaza por el programa actual. Al retirar un participante, se elimina de ambos programas y de las escenas guardadas. Los archivos utilizados por cualquiera de ellos quedan protegidos contra borrado.
 
-Se codifica **una vez por formato activo**, no por plataforma. Usar ambos formatos crea dos compositores y dos grabaciones MP4, y aumenta CPU, memoria y subida de red. La salida usa H.264/AAC a 30 fps y fotogramas clave cada 2 segundos. Con Facebook activo se limita a 6000 kbps de vídeo y 128 kbps de audio; con Twitch activo se limita el vídeo a 6000 kbps. Los límites se calculan por formato. La calidad de captura de la cámara sigue siendo independiente de la salida.
+Se codifica **una vez por formato activo**, no por plataforma. Usar ambos formatos crea dos compositores (y dos MP4 si grabas), y aumenta CPU, memoria y subida de red. Con el motor local la grabación copia esa misma codificación: añade escritura en disco, no otra codificación. Grabar sin emitir evita la subida de red y los publicadores RTMP. Solo grabar sin destinos usa 16:9; con destinos activos usa sus formatos. La salida usa H.264/AAC a 30 fps y fotogramas clave cada 2 segundos. Con Facebook activo se limita a 6000 kbps de vídeo y 128 kbps de audio; con Twitch activo se limita el vídeo a 6000 kbps. Los límites se calculan por formato. La calidad de captura de la cámara sigue siendo independiente de la salida.
 
 Cada destino muestra Preparado, Conectando, Enviando señal, Reconectando o Sin señal. En escritorio, cada publicador RTMP copia el vídeo y audio codificados a través de una cola limitada, con plazos de escritura y reconexión automática. Una conexión caída no bloquea las demás ni el MP4. **Reintentar** actúa sobre el destino seleccionado; en servidor utiliza `UpdateStream` de Egress sin volver a añadir las salidas sanas. «Enviando señal» confirma actividad del publicador; la recepción pública final se comprueba en el panel de la plataforma.
 
-API: `GET/POST /api/v1/destinations`, `PATCH/DELETE /api/v1/destinations/{id}`, `PUT /api/v1/program?format=landscape|portrait`, `POST /api/v1/scenes`, `POST /api/v1/scenes/{id}/activate`, `DELETE /api/v1/scenes/{id}`, `POST /api/v1/broadcast/retry?destination_id={id}`. Los estudios anteriores conservan sus destinos como horizontales.
+API: `GET/POST /api/v1/destinations`, `PATCH/DELETE /api/v1/destinations/{id}`, `PUT /api/v1/program?format=landscape|portrait`, `POST /api/v1/scenes`, `POST /api/v1/scenes/{id}/activate`, `PUT /api/v1/scenes/{id}` (reemplaza por el programa actual), `DELETE /api/v1/scenes/{id}`, `POST /api/v1/broadcast/retry?destination_id={id}`. Los estudios anteriores conservan sus destinos como horizontales.
 
 La conexión sigue siendo por URL y clave; OAuth y gestión de eventos mediante las APIs de YouTube/Twitch no están implementados. Las pruebas locales no certifican recepción en plataformas reales. Algunas cuentas necesitan acceso a emisión por RTMP. La composición doble en servidor requiere capacidad para dos trabajos de Egress y sigue pendiente de validación en VPS.
 
