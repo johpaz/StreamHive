@@ -229,7 +229,8 @@ if (primary) app.whenReady().then(async () => {
     show: !process.env.STREAMHIVE_E2E,
     webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, sandbox: true, backgroundThrottling: !process.env.STREAMHIVE_E2E },
   });
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => { if (origin(url) !== origin(base)) void shell.openExternal(url); return { action: "deny" }; });
+  // Los enlaces del chat los escriben otras personas: solo http(s) va al navegador del sistema.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//i.test(url) && origin(url) !== origin(base)) void shell.openExternal(url); return { action: "deny" }; });
   await enter();
   setInterval(enter, 6 * 3600 * 1000).unref(); // la sesión dura 12 h: se renueva sin que el usuario haga nada
   void mainWindow.loadURL(base);

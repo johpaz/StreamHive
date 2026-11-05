@@ -135,7 +135,7 @@ impl App {
         let c = Connection::open(&config.database)?;
         let schema_version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            schema_version <= 2,
+            schema_version <= 3,
             "Database schema is newer than this service; refusing downgrade"
         );
         c.busy_timeout(Duration::from_secs(5))?;
@@ -148,7 +148,8 @@ impl App {
           CREATE INDEX IF NOT EXISTS participants_session ON participants(session_id);
           ")?;
         chat_store::init(&c)?;
-        c.pragma_update(None, "user_version", 2)?;
+        // 3: archivos del chat (tabla chat_files y columna attachment_id).
+        c.pragma_update(None, "user_version", 3)?;
         chat_store::prune(&c, now())?;
         let (shutdown, _) = watch::channel(false);
         Ok(Self {
@@ -207,6 +208,7 @@ impl App {
             Ok(())
         })
         .await?;
+        chat::sweep(self).await;
         // Expired sessions terminate their sockets on the periodic authorization check.
         self.rooms
             .lock()
@@ -787,6 +789,8 @@ pub fn router(s: App) -> Router {
         .route("/api/v1/events", get(events))
         .route("/api/v1/chat/messages", get(chat::history).post(chat::send))
         .route("/api/v1/chat/messages/{id}", delete(chat::delete))
+        .route("/api/v1/chat/files", post(chat::upload))
+        .route("/api/v1/chat/files/{id}", get(chat::download))
         .route(
             "/",
             get(|| async { Html(include_str!("../web/index.html")) }),

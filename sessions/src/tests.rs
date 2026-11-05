@@ -446,7 +446,7 @@ async fn origin_limits_and_api_fallback_are_enforced() {
 async fn a_newer_database_is_never_silently_downgraded() {
     let s = app();
     s.db(|c| {
-        c.execute_batch("PRAGMA user_version=3")?;
+        c.execute_batch("PRAGMA user_version=4")?;
         Ok(())
     })
     .await
@@ -612,6 +612,157 @@ async fn chat_requires_admission_is_scoped_and_recovers_moderation() {
     .await;
     assert_eq!(
         call(&s, "GET", &path, Some(&owner), None, Value::Null)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+async fn raw(
+    s: &App,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    cookie_value: Option<&str>,
+    name: &str,
+    body: Vec<u8>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut r = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            "x-file-name",
+            base64::engine::general_purpose::STANDARD.encode(name),
+        );
+    if let Some(t) = token {
+        r = r.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    if let Some(t) = cookie_value {
+        r = r.header(header::COOKIE, t);
+    }
+    let response = router(s.clone())
+        .oneshot(r.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, bytes.to_vec())
+}
+
+#[tokio::test]
+async fn chat_files_reach_waiting_guests_and_never_rejected_ones() {
+    let s = app();
+    let owner = install(&s).await;
+    let sid = room(&s, &owner).await;
+    let i = invite(&s, &owner, &sid).await;
+    let (cookie, _) = join_guest(&s, &i, "Ana").await;
+    let files = format!("/api/v1/chat/files?session_id={sid}");
+    // Más grande que el límite general de 16 KB de las peticiones JSON.
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    pdf.resize(300_000, b'x');
+    let up = raw(
+        &s,
+        "POST",
+        &files,
+        None,
+        Some(&cookie),
+        "Guion.pdf",
+        pdf.clone(),
+    )
+    .await;
+    assert_eq!(up.0, StatusCode::OK, "{}", String::from_utf8_lossy(&up.2));
+    let fid = serde_json::from_slice::<Value>(&up.2).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sent = call(
+        &s,
+        "POST",
+        "/api/v1/chat/messages",
+        None,
+        Some(&cookie),
+        json!({"session_id":sid,"client_message_id":id(),"text":"","attachment_id":fid}),
+    )
+    .await;
+    assert_eq!(sent.0, StatusCode::OK, "{}", sent.2);
+    assert_eq!(sent.2["sender_role"], "waiting");
+    assert_eq!(sent.2["attachment"]["name"], "Guion.pdf");
+    let path = format!("/api/v1/chat/files/{fid}?session_id={sid}");
+    let got = raw(&s, "GET", &path, Some(&owner), None, "x", vec![]).await;
+    assert_eq!(got.0, StatusCode::OK);
+    assert_eq!(got.2, pdf);
+    assert!(
+        got.1[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment;")
+    );
+    assert_eq!(got.1[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+    assert_eq!(
+        raw(
+            &s,
+            "POST",
+            &files,
+            None,
+            Some(&cookie),
+            "x.pdf",
+            b"MZ".to_vec()
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    // Otra sesión no ve el archivo.
+    let other = room(&s, &install(&s).await).await;
+    assert_eq!(
+        raw(
+            &s,
+            "GET",
+            &format!("/api/v1/chat/files/{fid}?session_id={other}"),
+            None,
+            Some(&cookie),
+            "x",
+            vec![]
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    // Rechazada: sin acceso.
+    let (rejected, r) = join_guest(&s, &i, "Luis").await;
+    call(
+        &s,
+        "POST",
+        &format!(
+            "/api/v1/sessions/{sid}/participants/{}",
+            r["participant_id"].as_str().unwrap()
+        ),
+        Some(&owner),
+        None,
+        json!({"action":"reject"}),
+    )
+    .await;
+    assert_eq!(
+        raw(&s, "GET", &path, None, Some(&rejected), "x", vec![])
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    // El anfitrión borra el mensaje y el archivo deja de existir, también en disco.
+    let mid = sent.2["id"].as_str().unwrap();
+    call(
+        &s,
+        "DELETE",
+        &format!("/api/v1/chat/messages/{mid}?session_id={sid}"),
+        Some(&owner),
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        raw(&s, "GET", &path, Some(&owner), None, "x", vec![])
             .await
             .0,
         StatusCode::NOT_FOUND

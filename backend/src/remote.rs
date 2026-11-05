@@ -498,3 +498,79 @@ pub async fn chat_request(
     }
     request(&c.url, Some(credential(s, &c)?), method, &path, body).await
 }
+/// Archivos del chat remoto: el escritorio los sube y los descarga con sus
+/// credenciales, con más tiempo que las peticiones de control.
+async fn file_request(
+    s: &App,
+    sid: &str,
+    q: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, Error> {
+    if current_id(s)? != sid {
+        return Err(Error(StatusCode::GONE, "La conversación cambió".into()));
+    }
+    let r = q
+        .send()
+        .await
+        .map_err(|_| bad("No se pudo conectar con el servidor de sesiones"))?;
+    if r.status().is_success() {
+        return Ok(r);
+    }
+    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let text = r
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "El servidor no pudo completar la operación".into());
+    Err(Error(status, text))
+}
+fn file_client() -> Result<reqwest::Client, Error> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| bad("No se pudo crear la conexión"))
+}
+pub async fn chat_upload(
+    s: &App,
+    sid: &str,
+    encoded_name: &str,
+    bytes: Vec<u8>,
+) -> Result<Value, Error> {
+    let c = configured(s).await?;
+    let q = file_client()?
+        .post(format!("{}/api/v1/chat/files?session_id={sid}", c.url))
+        .bearer_auth(credential(s, &c)?)
+        .header("x-file-name", encoded_name)
+        .header("content-type", "application/octet-stream")
+        .body(bytes);
+    file_request(s, sid, q)
+        .await?
+        .json()
+        .await
+        .map_err(|_| bad("El servidor no devolvió una respuesta válida"))
+}
+/// Devuelve tipo, nombre (Content-Disposition) y contenido de un archivo remoto.
+pub async fn chat_file(s: &App, sid: &str, id: &str) -> Result<(String, String, Vec<u8>), Error> {
+    let c = configured(s).await?;
+    let q = file_client()?
+        .get(format!("{}/api/v1/chat/files/{id}?session_id={sid}", c.url))
+        .bearer_auth(credential(s, &c)?);
+    let mut r = file_request(s, sid, q).await?;
+    let header = |name| {
+        r.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned()
+    };
+    let (mime, disposition) = (header("content-type"), header("content-disposition"));
+    let mut bytes = Vec::new();
+    while let Some(chunk) = r.chunk().await.map_err(|_| bad("Descarga incompleta"))? {
+        if bytes.len() + chunk.len() > crate::chat_store::MAX_FILE as usize {
+            return Err(bad("Archivo demasiado grande"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((mime, disposition, bytes))
+}

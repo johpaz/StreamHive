@@ -3,7 +3,13 @@
 import { chromium } from "playwright";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtempSync, existsSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -228,6 +234,80 @@ try {
     overlap && (!overlap.horizontal || overlap.gap >= 0),
     `chat window must not cover the broadcast bar: ${JSON.stringify(overlap)}`,
   );
+  // Materiales: un PDF con un enlace, una imagen que pasa a Archivos y un
+  // programa renombrado que se rechaza.
+  const pdf = Buffer.from("%PDF-1.7\n% escaleta del directo\n");
+  await ana.p
+    .getByLabel("Archivo para el chat")
+    .setInputFiles({
+      name: "Escaleta.pdf",
+      mimeType: "application/pdf",
+      buffer: pdf,
+    });
+  await ana.p.locator(".chat-attachment").getByText("Escaleta.pdf").waitFor();
+  await ana.p
+    .getByLabel("Mensaje para todos")
+    .fill("Lean https://example.com/guion antes de entrar.");
+  await ana.p.getByRole("button", { name: "Enviar", exact: true }).click();
+  const pdfCard = page
+    .locator(".chat-message")
+    .filter({ hasText: "Escaleta.pdf" });
+  await pdfCard.waitFor();
+  const link = pdfCard.getByRole("link", { name: "https://example.com/guion" });
+  assert(
+    (await link.getAttribute("href")) === "https://example.com/guion" &&
+      (await link.getAttribute("rel")).includes("noopener"),
+    "links are clickable and isolated",
+  );
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    pdfCard.getByRole("link", { name: "Descargar Escaleta.pdf" }).click(),
+  ]);
+  assert(download.suggestedFilename() === "Escaleta.pdf", "download name");
+  assert(readFileSync(await download.path()).equals(pdf), "downloaded bytes");
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  await luis.p
+    .getByLabel("Archivo para el chat")
+    .setInputFiles({ name: "Cartel.png", mimeType: "image/png", buffer: png });
+  await luis.p.locator(".chat-attachment").getByText("Cartel.png").waitFor();
+  await luis.p.getByRole("button", { name: "Enviar", exact: true }).click();
+  const imageCard = page
+    .locator(".chat-message")
+    .filter({ hasText: "Cartel.png" });
+  await imageCard.locator("img").waitFor();
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll(".chat-file img")].some(
+      (i) => i.complete && i.naturalWidth > 0,
+    ),
+  );
+  await luis.p
+    .locator(".chat-message")
+    .filter({ hasText: "Cartel.png" })
+    .locator("img")
+    .waitFor();
+  assert(
+    (await luis.p
+      .getByRole("button", { name: "Llevar a Archivos" })
+      .count()) === 0,
+    "guests cannot move files to Archivos",
+  );
+  await imageCard.getByRole("button", { name: "Llevar a Archivos" }).click();
+  await page.getByText("«Cartel.png» ya está en Archivos").waitFor();
+  const library = await request(host, origin, "/assets", undefined, "get");
+  assert(
+    library.some((a) => a.name === "Cartel.png" && a.kind === "image"),
+    "image moved to Archivos",
+  );
+  await ana.p.getByLabel("Archivo para el chat").setInputFiles({
+    name: "guion.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("MZ programa renombrado"),
+  });
+  await ana.p.getByText(/Formato no admitido/).waitFor();
+  await page.screenshot({ path: join(work, "files.png") });
   await ana.p.screenshot({ path: join(work, "mobile.png") });
   await ana.p.reload();
   await ana.p
@@ -388,6 +468,58 @@ try {
     (await remoteEarly.locator(".chat-waiting").count()) === 1,
     "remote waiting guest tagged for the host",
   );
+  // Materiales en remoto: del invitado al anfitrión por el puente del escritorio,
+  // y del anfitrión a otro invitado.
+  const remotePdf = Buffer.from("%PDF-1.4\n% remoto\n");
+  await remoteGuests[0].p
+    .getByLabel("Archivo para el chat")
+    .setInputFiles({
+      name: "Remoto.pdf",
+      mimeType: "application/pdf",
+      buffer: remotePdf,
+    });
+  await remoteGuests[0].p
+    .locator(".chat-attachment")
+    .getByText("Remoto.pdf")
+    .waitFor();
+  await remoteGuests[0].p
+    .getByRole("button", { name: "Enviar", exact: true })
+    .click();
+  const remoteCard = page
+    .locator(".chat-message")
+    .filter({ hasText: "Remoto.pdf" });
+  await remoteCard.waitFor();
+  const [remoteDownload] = await Promise.all([
+    page.waitForEvent("download"),
+    remoteCard.getByRole("link", { name: "Descargar Remoto.pdf" }).click(),
+  ]);
+  assert(
+    readFileSync(await remoteDownload.path()).equals(remotePdf),
+    "remote download through the desktop bridge",
+  );
+  await page.getByLabel("Archivo para el chat").setInputFiles({
+    name: "Indicaciones.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("Entras en el bloque 2"),
+  });
+  await page
+    .locator(".chat-attachment")
+    .getByText("Indicaciones.txt")
+    .waitFor();
+  await page.getByRole("button", { name: "Enviar", exact: true }).click();
+  const guestCard = remoteGuests[1].p
+    .locator(".chat-message")
+    .filter({ hasText: "Indicaciones.txt" });
+  await guestCard.waitFor();
+  const [guestDownload] = await Promise.all([
+    remoteGuests[1].p.waitForEvent("download"),
+    guestCard.getByRole("link", { name: "Descargar Indicaciones.txt" }).click(),
+  ]);
+  assert(
+    readFileSync(await guestDownload.path()).toString() ===
+      "Entras en el bloque 2",
+    "remote guest downloads the host's file",
+  );
   const remoteSendTime = Date.now();
   await page
     .getByLabel("Mensaje para todos")
@@ -443,8 +575,8 @@ try {
       scenarios: [
         "three sizes",
         "bee",
-        "local host + two guests + waiting room",
-        "remote bridge + two guests + waiting room",
+        "local host + two guests + waiting room + files",
+        "remote bridge + two guests + waiting room + files",
         "text safety",
         "unread",
         "reload",

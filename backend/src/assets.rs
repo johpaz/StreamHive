@@ -305,3 +305,35 @@ mod tests {
         assert!(media_type("audio/wav", b"RIFF\0\0\0\0WEBPVP8 ").is_none());
     }
 }
+/// Guarda en la biblioteca una imagen ya validada (por ejemplo, del chat).
+pub async fn import(s: &App, name: String, mime: &str, bytes: Vec<u8>) -> Result<Asset, Error> {
+    let (kind, extension) = media_type(mime, &bytes[..bytes.len().min(32)])
+        .filter(|(kind, _)| *kind == "image")
+        .ok_or_else(|| bad("Solo las imágenes PNG, JPG o WebP pasan a Archivos"))?;
+    if bytes.len() as u64 > 20 * 1024 * 1024 {
+        return Err(bad("Máximo 20 MB por imagen"));
+    }
+    let name: String = name.chars().take(180).collect();
+    let identity = id();
+    let filename = format!("{identity}.{extension}");
+    let destination = s.assets.join(&filename);
+    tokio::fs::write(&destination, &bytes)
+        .await
+        .map_err(|e| Error::from(anyhow::Error::new(e)))?;
+    let asset = Asset {
+        id: identity.clone(),
+        name,
+        filename,
+        mime: mime.into(),
+        kind: kind.into(),
+        bytes: bytes.len() as u64,
+        created: now(),
+    };
+    let mut d = s.data.lock().await;
+    d.assets.insert(identity, asset.clone());
+    if let Err(e) = s.persist(&mut d) {
+        let _ = tokio::fs::remove_file(destination).await;
+        return Err(e);
+    }
+    Ok(asset)
+}

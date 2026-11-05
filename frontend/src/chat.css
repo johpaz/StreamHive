@@ -246,6 +246,112 @@
 .chat-composer .chat-limit {
   color: #ffaaa0;
 }
+.chat-composer > div.chat-attachment {
+  justify-content: flex-start;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--chat-line);
+  border-radius: 10px;
+  font-size: 12px;
+  min-width: 0;
+}
+.chat-attachment progress {
+  flex: 1;
+  min-width: 40px;
+  accent-color: var(--chat-accent);
+}
+.chat-attachment-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-attachment button {
+  font-size: 11px;
+  min-height: 28px;
+  padding: 2px 8px;
+}
+.chat-composer .chat-attach {
+  font-size: 16px;
+  padding: 4px 10px;
+}
+.chat-composer > div:last-child small {
+  margin-left: 8px;
+  margin-right: auto;
+}
+.chat-message a {
+  color: var(--chat-accent);
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+.chat-file {
+  margin-top: 8px;
+  border: 1px solid var(--chat-line);
+  border-radius: 10px;
+  background: #0c2222;
+  overflow: hidden;
+}
+.chat-file-preview {
+  display: block;
+  background: #071615;
+}
+.chat-file-preview img {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+}
+.chat-file-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 4px;
+  min-width: 0;
+}
+.chat-file-info > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.chat-file-info b {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-file-info small {
+  font-size: 10px;
+  color: var(--chat-muted);
+}
+.chat-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 10px 8px;
+}
+.chat-message .chat-file-actions a,
+.chat-file-actions button {
+  font-size: 11px;
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid var(--chat-line);
+  border-radius: 8px;
+  background: var(--chat-panel);
+  color: var(--chat-text);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.chat-message .chat-pending-file {
+  color: var(--chat-muted);
+}
+.chat-notice {
+  font-size: 12px;
+  background: #1f4a37;
+  padding: 8px 12px;
+}
 .chat-error {
   font-size: 12px;
   background: #4b2927;

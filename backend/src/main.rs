@@ -65,6 +65,8 @@ struct App {
     audio_bitrate: u32,
     recordings: PathBuf,
     assets: PathBuf,
+    /// Archivos compartidos en el chat; se borran con sus mensajes.
+    chat_files: PathBuf,
     secure_cookie: bool,
     login_attempts: Arc<Mutex<(u64, u32)>>,
 }
@@ -2423,6 +2425,9 @@ fn router(s: App) -> Router {
         .route("/api/v1/chat/messages", get(chat::history).post(chat::send))
         .route("/api/v1/chat/messages/{id}", delete(chat::delete))
         .route("/api/v1/chat/conversation", post(chat::rotate))
+        .route("/api/v1/chat/files", post(chat::upload))
+        .route("/api/v1/chat/files/{id}", get(chat::download))
+        .route("/api/v1/chat/files/{id}/library", post(chat::to_library))
         .route("/api/v1/invitations", post(invite).get(invitations))
         .route("/api/v1/invitations/{id}", delete(revoke))
         .route("/api/v1/join", post(join))
@@ -2634,6 +2639,7 @@ async fn main() -> anyhow::Result<()> {
             .clamp(64, 320),
         recordings,
         assets,
+        chat_files: runtime.join("chat-files"),
         secure_cookie: origin.starts_with("https://"),
         login_attempts: Arc::new(Mutex::new((now(), 0))),
     };
@@ -2743,6 +2749,7 @@ mod api_tests {
             audio_bitrate: 160,
             recordings: std::env::temp_dir(),
             assets: std::env::temp_dir(),
+            chat_files: std::env::temp_dir().join(format!("sh-chat-files-{}", id())),
             secure_cookie: true,
             login_attempts: Arc::new(Mutex::new((now(), 0))),
         }
@@ -5142,6 +5149,300 @@ mod api_tests {
                 .0,
             StatusCode::UNAUTHORIZED
         );
+    }
+    async fn raw(
+        s: &App,
+        method: &str,
+        path: &str,
+        identity: Option<(&str, &str)>,
+        name: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        use base64::Engine;
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::ORIGIN, &s.origin)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(
+                "x-file-name",
+                base64::engine::general_purpose::STANDARD.encode(name),
+            );
+        if let Some((sub, role)) = identity {
+            request = request.header(
+                header::COOKIE,
+                format!("sh_session={}", session(&s.session_secret, sub, role)),
+            );
+        }
+        let response = router(s.clone())
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, bytes.to_vec())
+    }
+    #[tokio::test]
+    async fn chat_files_for_everyone_typed_scoped_and_deleted_with_their_message() {
+        let s = app();
+        waiting(&s, "guest").await;
+        let admin = Some(("host", "admin"));
+        let guest = Some(("guest", "guest"));
+        let sid = call(&s, "GET", "/api/v1/chat/messages", admin, Value::Null)
+            .await
+            .2["conversation_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let files = format!("/api/v1/chat/files?session_id={sid}");
+        let pdf = b"%PDF-1.7\n% escaleta del directo\n".to_vec();
+        // Quien espera también comparte materiales.
+        let up = raw(&s, "POST", &files, guest, "Escaleta día 1.pdf", pdf.clone()).await;
+        assert_eq!(up.0, StatusCode::OK, "{}", String::from_utf8_lossy(&up.2));
+        let file: Value = serde_json::from_slice(&up.2).unwrap();
+        assert_eq!(file["mime"], "application/pdf");
+        let fid = file["id"].as_str().unwrap().to_owned();
+        // Sin enviar no se puede descargar.
+        let path = format!("/api/v1/chat/files/{fid}?session_id={sid}");
+        assert_eq!(
+            raw(&s, "GET", &path, admin, "x", vec![]).await.0,
+            StatusCode::NOT_FOUND
+        );
+        // Nadie más puede enviar el archivo de otra persona.
+        let claim = |text: &str| json!({"session_id":sid,"client_message_id":uuid::Uuid::new_v4().to_string(),"text":text,"attachment_id":fid});
+        assert_eq!(
+            call(&s, "POST", "/api/v1/chat/messages", admin, claim("mío"))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let sent = call(&s, "POST", "/api/v1/chat/messages", guest, claim("")).await;
+        assert_eq!(sent.0, StatusCode::OK, "{}", sent.2);
+        assert_eq!(sent.2["attachment"]["name"], "Escaleta día 1.pdf");
+        assert_eq!(sent.2["text"], "");
+        let page = call(&s, "GET", "/api/v1/chat/messages", admin, Value::Null)
+            .await
+            .2;
+        assert_eq!(page["messages"][0]["attachment"]["id"], fid.as_str());
+        // Se descarga siempre como adjunto y sin interpretar.
+        let got = raw(&s, "GET", &path, admin, "x", vec![]).await;
+        assert_eq!(got.0, StatusCode::OK);
+        assert_eq!(got.2, pdf);
+        assert_eq!(got.1[header::CONTENT_TYPE], "application/pdf");
+        assert!(
+            got.1[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .starts_with("attachment;")
+        );
+        assert!(
+            got.1[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .contains("UTF-8''Escaleta%20d%C3%ADa%201.pdf")
+        );
+        assert_eq!(got.1[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(
+            raw(&s, "GET", &path, guest, "x", vec![]).await.0,
+            StatusCode::OK
+        );
+        // Un programa renombrado no pasa; tampoco tipos fuera de la lista.
+        for (name, body) in [
+            ("guion.pdf", b"MZ\x90\x00 programa".to_vec()),
+            ("foto.png", b"GIF89a".to_vec()),
+            ("script.html", b"<script>alert(1)</script>".to_vec()),
+            ("datos.zip.exe", b"PK\x03\x04 zip".to_vec()),
+            ("notas.txt", b"texto\x00binario".to_vec()),
+        ] {
+            assert_eq!(
+                raw(&s, "POST", &files, guest, name, body).await.0,
+                StatusCode::BAD_REQUEST,
+                "{name}"
+            );
+        }
+        for (name, body, mime) in [
+            ("notas.txt", "Preguntas ✓".as_bytes().to_vec(), "text/plain"),
+            ("invitados.csv", b"nombre,turno\nAna,1".to_vec(), "text/csv"),
+            (
+                "guion.docx",
+                b"PK\x03\x04 docx".to_vec(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+        ] {
+            let r = raw(&s, "POST", &files, admin, name, body).await;
+            assert_eq!(serde_json::from_slice::<Value>(&r.2).unwrap()["mime"], mime);
+        }
+        assert_eq!(
+            raw(
+                &s,
+                "POST",
+                &files,
+                guest,
+                "../../etc/passwd.txt",
+                b"x".to_vec()
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        // Una imagen pasa a Archivos solo por el anfitrión; un PDF no.
+        let png = b"\x89PNG\r\n\x1a\n imagen".to_vec();
+        let image: Value = serde_json::from_slice(
+            &raw(&s, "POST", &files, guest, "cartel.png", png.clone())
+                .await
+                .2,
+        )
+        .unwrap();
+        let iid = image["id"].as_str().unwrap();
+        let sent = call(&s, "POST", "/api/v1/chat/messages", guest, json!({"session_id":sid,"client_message_id":uuid::Uuid::new_v4().to_string(),"text":"Para mostrar","attachment_id":iid})).await;
+        assert_eq!(sent.0, StatusCode::OK);
+        let library = format!("/api/v1/chat/files/{iid}/library?session_id={sid}");
+        assert_eq!(
+            call(&s, "POST", &library, guest, Value::Null).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let asset = call(&s, "POST", &library, admin, Value::Null).await;
+        assert_eq!(asset.0, StatusCode::OK, "{}", asset.2);
+        assert_eq!(asset.2["kind"], "image");
+        assert_eq!(asset.2["name"], "cartel.png");
+        assert!(
+            s.data
+                .lock()
+                .await
+                .assets
+                .contains_key(asset.2["id"].as_str().unwrap())
+        );
+        assert_eq!(
+            call(
+                &s,
+                "POST",
+                &format!("/api/v1/chat/files/{fid}/library?session_id={sid}"),
+                admin,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        // Borrar el mensaje borra el archivo.
+        let mid = page["messages"][0]["id"].as_str().unwrap();
+        call(
+            &s,
+            "DELETE",
+            &format!("/api/v1/chat/messages/{mid}?session_id={sid}"),
+            admin,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            raw(&s, "GET", &path, admin, "x", vec![]).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let deleted = call(&s, "GET", "/api/v1/chat/messages", admin, Value::Null)
+            .await
+            .2;
+        assert!(deleted["messages"][0]["attachment"].is_null());
+        // Una persona retirada ya no descarga nada.
+        let image_path = format!("/api/v1/chat/files/{iid}?session_id={sid}");
+        assert_eq!(
+            raw(&s, "GET", &image_path, guest, "x", vec![]).await.0,
+            StatusCode::OK
+        );
+        s.data
+            .lock()
+            .await
+            .participants
+            .get_mut("guest")
+            .unwrap()
+            .status = "removed".into();
+        assert_eq!(
+            raw(&s, "GET", &image_path, guest, "x", vec![]).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            raw(&s, "POST", &files, guest, "a.pdf", pdf.clone()).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    #[tokio::test]
+    async fn chat_files_respect_size_rate_and_conversation_limits() {
+        let s = app();
+        let admin = Some(("host", "admin"));
+        let sid = call(&s, "GET", "/api/v1/chat/messages", admin, Value::Null)
+            .await
+            .2["conversation_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let files = format!("/api/v1/chat/files?session_id={sid}");
+        let mut big = b"%PDF-".to_vec();
+        big.resize(chat_store::MAX_FILE as usize + 1, b'x');
+        assert_eq!(
+            raw(&s, "POST", &files, admin, "grande.pdf", big).await.0,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            raw(&s, "POST", &files, admin, "vacío.pdf", vec![]).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        for i in 0..10 {
+            assert_eq!(
+                raw(
+                    &s,
+                    "POST",
+                    &files,
+                    admin,
+                    &format!("{i}.pdf"),
+                    b"%PDF-1".to_vec()
+                )
+                .await
+                .0,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            raw(&s, "POST", &files, admin, "11.pdf", b"%PDF-1".to_vec())
+                .await
+                .0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // Otra conversación: los archivos viejos ya no se sirven.
+        assert_eq!(
+            raw(
+                &s,
+                "POST",
+                "/api/v1/chat/files?session_id=otra",
+                admin,
+                "a.pdf",
+                b"%PDF-1".to_vec()
+            )
+            .await
+            .0,
+            StatusCode::GONE
+        );
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        chat_store::init(&c).unwrap();
+        chat_store::ensure(&c, "a").unwrap();
+        let half = (chat_store::MAX_CONVERSATION_FILES / 2) as u64;
+        assert!(
+            chat_store::add_file(&mut c, "a", "f1", "u1", "a.pdf", "application/pdf", half, 0)
+                .is_ok()
+        );
+        assert!(
+            chat_store::add_file(&mut c, "a", "f2", "u2", "b.pdf", "application/pdf", half, 0)
+                .is_ok()
+        );
+        assert!(matches!(
+            chat_store::add_file(&mut c, "a", "f3", "u3", "c.pdf", "application/pdf", 1, 0),
+            Err(chat_store::Failure::Invalid(_))
+        ));
+        // Las subidas nunca enviadas caducan en una hora.
+        chat_store::prune(&c, 3601).unwrap();
+        let left: i64 = c
+            .query_row("SELECT COUNT(*) FROM chat_files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 }
 

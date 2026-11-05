@@ -9,6 +9,14 @@ impl From<db::Failure> for Error {
                 "Espera unos segundos antes de enviar otro mensaje",
             ),
             db::Failure::Closed => Error(StatusCode::GONE, "La conversación terminó"),
+            db::Failure::TooLarge => Error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Cada archivo puede pesar hasta 25 MB",
+            ),
+            db::Failure::Io(_) => Error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "No se pudo guardar el archivo",
+            ),
             db::Failure::Database(e) => e.into(),
         }
     }
@@ -104,5 +112,89 @@ pub async fn delete(
         })
         .await?;
     s.chat_bus.notify(&sid, "chat.deleted");
+    sweep(&s).await;
     Ok(Json(v))
+}
+#[derive(Deserialize)]
+pub struct FileQuery {
+    session_id: String,
+}
+fn file_name(h: &HeaderMap) -> Result<String> {
+    h.get("x-file-name")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok())
+        .and_then(|v| String::from_utf8(v).ok())
+        .filter(|n| db::valid_file_name(n))
+        .ok_or_else(|| invalid("Nombre de archivo inválido"))
+}
+impl App {
+    pub(crate) fn chat_files(&self) -> PathBuf {
+        self.config
+            .database
+            .parent()
+            .map(|p| p.join("chat-files"))
+            .unwrap_or_else(|| PathBuf::from("chat-files"))
+    }
+}
+/// Materiales del chat: anfitrión e invitados (en directo o en espera) suben un
+/// archivo y después lo envían en un mensaje con `attachment_id`.
+pub async fn upload(
+    State(s): State<App>,
+    Query(q): Query<FileQuery>,
+    req: Request,
+) -> Result<Json<Value>> {
+    let h = req.headers().clone();
+    let name = file_name(&h)?;
+    let sid = q.session_id;
+    let a = actor(&s, &h, &sid).await?;
+    let key = sid.clone();
+    let (uploader, _, _) = s.db(move |c| check(c, &key, &a)).await?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let dir = s.chat_files();
+    let (size, head) = db::receive(req.into_body(), &dir, &id).await?;
+    let Some(mime) = db::sniff(&name, &head) else {
+        let _ = tokio::fs::remove_file(dir.join(&id)).await;
+        return Err(invalid(
+            "Formato no admitido: PDF, imágenes, texto, CSV, Office, OpenDocument o ZIP",
+        ));
+    };
+    let file = id.clone();
+    let v = s
+        .db(move |c| {
+            db::ensure(c, &sid)?;
+            db::add_file(c, &sid, &file, &uploader, &name, mime, size, now()).map_err(Error::from)
+        })
+        .await;
+    if v.is_err() {
+        let _ = tokio::fs::remove_file(dir.join(&id)).await;
+    }
+    Ok(Json(v?))
+}
+pub async fn download(
+    State(s): State<App>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> Result<Response> {
+    if uuid::Uuid::parse_str(&id).is_err() {
+        return Err(missing());
+    }
+    let sid = q.session_id;
+    let a = actor(&s, &h, &sid).await?;
+    let key = id.clone();
+    let (name, mime) = s
+        .db(move |c| {
+            check(c, &sid, &a)?;
+            db::file(c, &sid, &key).map_err(|_| missing())
+        })
+        .await?;
+    let bytes = tokio::fs::read(s.chat_files().join(&id))
+        .await
+        .map_err(|_| missing())?;
+    Ok(db::download(&name, &mime, bytes))
+}
+/// Quita del disco los archivos de mensajes borrados o caducados.
+pub async fn sweep(s: &App) {
+    let dir = s.chat_files();
+    let _ = s.db(move |c| db::sweep(c, &dir).map_err(Error::from)).await;
 }

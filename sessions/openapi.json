@@ -748,6 +748,135 @@
           }
         }
       }
+    },
+    "/api/v1/chat/files": {
+      "post": {
+        "summary": "Host, admitted and waiting participants: upload a file to share in the chat (PDF, PNG/JPG/WebP, TXT/CSV/MD, DOCX/XLSX/PPTX, ODT/ODS/ODP, ZIP). Send it afterwards with attachment_id.",
+        "security": [
+          {
+            "installation": []
+          },
+          {
+            "guest": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-file-name",
+            "in": "header",
+            "required": true,
+            "description": "Original name, UTF-8 encoded in base64",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored, waiting to be sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatAttachment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name, empty file, or the content does not match an allowed format"
+          },
+          "401": {
+            "description": "Authentication or current admission (or waiting room) required"
+          },
+          "410": {
+            "description": "Conversation closed or changed"
+          },
+          "413": {
+            "description": "More than 25 MB"
+          },
+          "429": {
+            "description": "More than 10 files per minute per participant"
+          }
+        }
+      }
+    },
+    "/api/v1/chat/files/{id}": {
+      "get": {
+        "summary": "Download a file sent in a message that has not been deleted. Always served as an attachment with nosniff.",
+        "security": [
+          {
+            "installation": []
+          },
+          {
+            "guest": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File content",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "attachment; filename*=UTF-8''…"
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication or current admission (or waiting room) required"
+          },
+          "404": {
+            "description": "Unknown, unsent or deleted file"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -817,6 +946,17 @@
           },
           "sequence": {
             "type": "integer"
+          },
+          "attachment": {
+            "description": "Shared file; null when none or after deletion",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChatAttachment"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -824,8 +964,7 @@
         "type": "object",
         "required": [
           "session_id",
-          "client_message_id",
-          "text"
+          "client_message_id"
         ],
         "properties": {
           "session_id": {
@@ -839,7 +978,12 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 2000,
-            "description": "Plain text; also capped at 8 KiB UTF-8"
+            "description": "Up to 2000 characters; may be empty when attachment_id is present"
+          },
+          "attachment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "File uploaded by the same sender with POST /api/v1/chat/files and not yet sent; text may then be empty"
           }
         }
       },
@@ -893,6 +1037,33 @@
               "integer",
               "null"
             ]
+          }
+        }
+      },
+      "ChatAttachment": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "mime",
+          "size"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 180
+          },
+          "mime": {
+            "type": "string",
+            "description": "Type detected from the file signature, never from the client"
+          },
+          "size": {
+            "type": "integer",
+            "maximum": 26214400
           }
         }
       }

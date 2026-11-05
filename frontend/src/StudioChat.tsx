@@ -10,7 +10,14 @@ import { createPortal } from "react-dom";
 import { api, ApiError } from "./api";
 import { ChatBee } from "./ChatBee";
 import {
+  CHAT_FILE_ACCEPT,
+  chatFileUrl,
+  formatBytes,
+  isChatImage,
+  linkParts,
   mergeMessages,
+  uploadChatFile,
+  type ChatAttachment,
   type ChatMessage,
   type ChatPage,
   type ChatSize,
@@ -22,7 +29,70 @@ type Pending = {
   text: string;
   failed: boolean;
   conversation: string;
+  attachment?: ChatAttachment;
 };
+/** Texto plano con los enlaces http(s) clicables; nunca se interpreta HTML. */
+function ChatText({ text }: { text: string }) {
+  return (
+    <>
+      {linkParts(text).map((part, i) =>
+        part.href ? (
+          <a key={i} href={part.href} target="_blank" rel="noopener noreferrer">
+            {part.text}
+          </a>
+        ) : (
+          part.text
+        ),
+      )}
+    </>
+  );
+}
+function ChatFile({
+  file,
+  conversation,
+  admin,
+  onLibrary,
+}: {
+  file: ChatAttachment;
+  conversation: string;
+  admin: boolean;
+  onLibrary: (file: ChatAttachment) => void;
+}) {
+  const url = chatFileUrl(file.id, conversation);
+  const image = isChatImage(file.mime);
+  return (
+    <div className="chat-file">
+      {image && (
+        <a href={url} download={file.name} className="chat-file-preview">
+          <img src={url} alt={file.name} loading="lazy" />
+        </a>
+      )}
+      <div className="chat-file-info">
+        <span className="chat-file-icon" aria-hidden="true">
+          {image ? "🖼" : "📄"}
+        </span>
+        <div>
+          <b title={file.name}>{file.name}</b>
+          <small>{formatBytes(file.size)}</small>
+        </div>
+      </div>
+      <div className="chat-file-actions">
+        <a
+          href={url}
+          download={file.name}
+          aria-label={`Descargar ${file.name}`}
+        >
+          Descargar
+        </a>
+        {admin && image && (
+          <button type="button" onClick={() => onLibrary(file)}>
+            Llevar a Archivos
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 /** Altura que ocupa la barra de emisión fija al fondo de la ventana. El chat
  * flotante se coloca encima para no tapar Grabar ni Finalizar directo. */
 function useBroadcastBarLift() {
@@ -96,6 +166,12 @@ export function StudioChat({
   const [canReset, setCanReset] = useState(false);
   const [conversation, setConversation] = useState("");
   const [draft, setDraft] = useState("");
+  const [attachment, setAttachment] = useState<ChatAttachment | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [notice, setNotice] = useState("");
+  const [fileError, setFileError] = useState("");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const uploading = useRef<AbortController | null>(null);
   const [error, setError] = useState("");
   const [online, setOnline] = useState(false);
   const [unread, setUnread] = useState(0);
@@ -139,6 +215,11 @@ export function StudioChat({
     setMessages([]);
     setPending([]);
     setDraft("");
+    uploading.current?.abort();
+    setAttachment(null);
+    setProgress(null);
+    setFileError("");
+    setNotice("");
     setConversation("");
     setUnread(0);
     setAnnouncement("");
@@ -359,6 +440,7 @@ export function StudioChat({
         session_id: item.conversation,
         client_message_id: item.id,
         text: item.text,
+        ...(item.attachment ? { attachment_id: item.attachment.id } : {}),
       });
       if (!alive.current || generation !== state.current.generation) return;
       known.current.add(message.id);
@@ -380,7 +462,8 @@ export function StudioChat({
   const submit = () => {
     const text = draft.trim();
     if (
-      !text ||
+      (!text && !attachment) ||
+      progress !== null ||
       [...text].length > 2000 ||
       new TextEncoder().encode(text).length > 8192 ||
       !conversation ||
@@ -388,8 +471,64 @@ export function StudioChat({
     )
       return;
     setDraft("");
+    setAttachment(null);
     state.current.atBottom = true;
-    void send({ id: crypto.randomUUID(), text, failed: false, conversation });
+    void send({
+      id: crypto.randomUUID(),
+      text,
+      failed: false,
+      conversation,
+      ...(attachment ? { attachment } : {}),
+    });
+  };
+  const attach = async (file: File) => {
+    if (!conversation) return;
+    const generation = state.current.generation;
+    uploading.current?.abort();
+    const controller = new AbortController();
+    uploading.current = controller;
+    setAttachment(null);
+    setProgress(0);
+    setFileError("");
+    try {
+      const uploaded = await uploadChatFile(
+        file,
+        conversation,
+        (n) => alive.current && setProgress(n),
+        controller.signal,
+      );
+      if (alive.current && generation === state.current.generation)
+        setAttachment(uploaded);
+    } catch (e) {
+      if (alive.current && !controller.signal.aborted)
+        setFileError(
+          e instanceof Error ? e.message : "No se pudo subir el archivo",
+        );
+    } finally {
+      if (uploading.current === controller) {
+        uploading.current = null;
+        if (alive.current) setProgress(null);
+      }
+      input.current?.focus();
+    }
+  };
+  const toLibrary = async (file: ChatAttachment) => {
+    try {
+      await api(
+        `/chat/files/${encodeURIComponent(file.id)}/library?session_id=${encodeURIComponent(conversation)}`,
+        "POST",
+      );
+      if (alive.current) {
+        setFileError("");
+        setNotice(`«${file.name}» ya está en Archivos`);
+        setTimeout(() => alive.current && setNotice(""), 4000);
+      }
+    } catch (e) {
+      if (alive.current)
+        setFileError(
+          e instanceof Error ? e.message : "No se pudo llevar a Archivos",
+        );
+    }
   };
   const loadOlder = async () => {
     if (!older || loadingOlder) return;
@@ -568,9 +707,23 @@ export function StudioChat({
                     })}
                   </time>
                 </div>
-                <p className={m.deleted ? "chat-deleted" : ""}>
-                  {m.deleted ? "Mensaje eliminado" : m.text}
-                </p>
+                {(m.deleted || m.text) && (
+                  <p className={m.deleted ? "chat-deleted" : ""}>
+                    {m.deleted ? (
+                      "Mensaje eliminado"
+                    ) : (
+                      <ChatText text={m.text} />
+                    )}
+                  </p>
+                )}
+                {!m.deleted && m.attachment && (
+                  <ChatFile
+                    file={m.attachment}
+                    conversation={conversation}
+                    admin={me.role === "admin"}
+                    onLibrary={(f) => void toLibrary(f)}
+                  />
+                )}
                 {me.role === "admin" && !m.deleted && (
                   <button
                     className="chat-delete"
@@ -587,7 +740,10 @@ export function StudioChat({
                 className="chat-message chat-own chat-pending"
                 key={p.id}
               >
-                <p>{p.text}</p>
+                {p.text && <p>{p.text}</p>}
+                {p.attachment && (
+                  <p className="chat-pending-file">📎 {p.attachment.name}</p>
+                )}
                 <small>{p.failed ? "No enviado" : "Enviando…"}</small>
                 {p.failed && (
                   <button onClick={() => void send(p)}>Reintentar envío</button>
@@ -608,6 +764,17 @@ export function StudioChat({
               {unread} mensajes nuevos ↓
             </button>
           )}
+          {notice && (
+            <div className="chat-notice" role="status">
+              {notice}
+            </div>
+          )}
+          {fileError && (
+            <div className="chat-error" role="alert">
+              {fileError}
+              <button onClick={() => setFileError("")}>Cerrar</button>
+            </div>
+          )}
           {error && (
             <div className="chat-error" role="alert">
               {error}
@@ -621,6 +788,46 @@ export function StudioChat({
               submit();
             }}
           >
+            {(progress !== null || attachment) && (
+              <div className="chat-attachment">
+                <span aria-hidden="true">📎</span>
+                {progress !== null ? (
+                  <>
+                    <span>Subiendo… {progress}%</span>
+                    <progress
+                      max={100}
+                      value={progress}
+                      aria-label="Progreso de la subida"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => uploading.current?.abort()}
+                    >
+                      Cancelar
+                    </button>
+                  </>
+                ) : (
+                  attachment && (
+                    <>
+                      <span
+                        className="chat-attachment-name"
+                        title={attachment.name}
+                      >
+                        {attachment.name}
+                      </span>
+                      <small>{formatBytes(attachment.size)}</small>
+                      <button
+                        type="button"
+                        aria-label={`Quitar ${attachment.name}`}
+                        onClick={() => setAttachment(null)}
+                      >
+                        Quitar
+                      </button>
+                    </>
+                  )
+                )}
+              </div>
+            )}
             <label className="chat-sr-only" htmlFor="studio-chat-input">
               Mensaje para todos
             </label>
@@ -643,6 +850,28 @@ export function StudioChat({
               }}
             />
             <div>
+              <input
+                ref={fileInput}
+                type="file"
+                hidden
+                accept={CHAT_FILE_ACCEPT}
+                aria-label="Archivo para el chat"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (file) void attach(file);
+                }}
+              />
+              <button
+                type="button"
+                className="chat-attach"
+                aria-label="Adjuntar archivo"
+                title="Adjuntar archivo (PDF, imágenes, Office, texto o ZIP, hasta 25 MB)"
+                disabled={!online || !conversation || progress !== null}
+                onClick={() => fileInput.current?.click()}
+              >
+                📎
+              </button>
               <small className={[...draft].length > 2000 ? "chat-limit" : ""}>
                 {[...draft].length}/2000
               </small>
@@ -651,7 +880,8 @@ export function StudioChat({
                 disabled={
                   !online ||
                   !conversation ||
-                  !draft.trim() ||
+                  progress !== null ||
+                  (!draft.trim() && !attachment) ||
                   [...draft.trim()].length > 2000
                 }
               >

@@ -9,6 +9,8 @@ pub enum Failure {
     Invalid(&'static str),
     Limited,
     Closed,
+    TooLarge,
+    Io(String),
 }
 impl From<rusqlite::Error> for Failure {
     fn from(e: rusqlite::Error) -> Self {
@@ -40,14 +42,164 @@ pub struct Page {
 pub struct Send {
     pub session_id: String,
     pub client_message_id: String,
+    #[serde(default)]
     pub text: String,
+    /// Archivo subido antes con `POST /chat/files`; el mensaje puede no llevar texto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<String>,
+}
+/// Materiales del chat: 25 MB por archivo y 200 MB por conversación.
+pub const MAX_FILE: u64 = 25 * 1024 * 1024;
+pub const MAX_CONVERSATION_FILES: i64 = 200 * 1024 * 1024;
+/// Tipo real del archivo por su firma (y la extensión para distinguir formatos ZIP).
+/// Nada ejecutable: solo documentos, imágenes, texto y ZIP.
+pub fn sniff(name: &str, head: &[u8]) -> Option<&'static str> {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if head.starts_with(b"%PDF-") {
+        return Some("application/pdf");
+    }
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if head.starts_with(b"\xff\xd8\xff") {
+        return Some("image/jpeg");
+    }
+    if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP") {
+        return Some("image/webp");
+    }
+    if head.starts_with(b"PK\x03\x04") || head.starts_with(b"PK\x05\x06") {
+        return Some(match ext.as_str() {
+            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "odt" => "application/vnd.oasis.opendocument.text",
+            "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+            "odp" => "application/vnd.oasis.opendocument.presentation",
+            "zip" => "application/zip",
+            _ => return None,
+        });
+    }
+    if matches!(ext.as_str(), "txt" | "csv" | "md") && !head.contains(&0) {
+        // Puede cortarse a mitad de un carácter: basta con que el resto sea UTF-8.
+        let ok = match std::str::from_utf8(head) {
+            Ok(_) => true,
+            Err(e) => e.error_len().is_none(),
+        };
+        if ok {
+            return Some(if ext == "csv" {
+                "text/csv"
+            } else {
+                "text/plain"
+            });
+        }
+    }
+    None
+}
+pub fn valid_file_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.chars().count() <= 180
+        && !name
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\')
+}
+/// Guarda el cuerpo de la petición en `dir/<id>` sin pasar de [`MAX_FILE`].
+/// Devuelve el tamaño y los primeros bytes para reconocer el tipo.
+pub async fn receive(
+    body: axum::body::Body,
+    dir: &std::path::Path,
+    id: &str,
+) -> Result<(u64, Vec<u8>)> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let io = |e: std::io::Error| Failure::Io(e.to_string());
+    tokio::fs::create_dir_all(dir).await.map_err(io)?;
+    let part = dir.join(format!("{id}.part"));
+    let result = async {
+        let mut file = tokio::fs::File::create(&part).await.map_err(io)?;
+        let mut stream = body.into_data_stream();
+        let (mut size, mut head) = (0u64, Vec::new());
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| Failure::Invalid("Se interrumpió la subida"))?;
+            size += chunk.len() as u64;
+            if size > MAX_FILE {
+                return Err(Failure::TooLarge);
+            }
+            if head.len() < 4096 {
+                head.extend_from_slice(&chunk[..chunk.len().min(4096 - head.len())]);
+            }
+            file.write_all(&chunk).await.map_err(io)?;
+        }
+        if size == 0 {
+            return Err(Failure::Invalid("El archivo está vacío"));
+        }
+        file.sync_all().await.map_err(io)?;
+        tokio::fs::rename(&part, dir.join(id)).await.map_err(io)?;
+        Ok((size, head))
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&part).await;
+    }
+    result
+}
+/// Respuesta de descarga: siempre como adjunto, para que nada se abra dentro del estudio.
+pub fn download(name: &str, mime: &str, bytes: Vec<u8>) -> axum::response::Response {
+    use axum::http::header;
+    let ascii: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || " ._-()".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let encoded: String = name
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b".-_~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, mime)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}"),
+        )
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "sandbox; default-src 'none'",
+        )
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .body(axum::body::Body::from(bytes))
+        .unwrap()
 }
 pub fn init(c: &Connection) -> rusqlite::Result<()> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS chat_conversations(id TEXT PRIMARY KEY, closed_at INTEGER);
       CREATE TABLE IF NOT EXISTS chat_messages(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE, sender_id TEXT NOT NULL, sender_name TEXT NOT NULL, sender_role TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, client_message_id TEXT NOT NULL, UNIQUE(conversation_id,sender_id,client_message_id));
       CREATE TABLE IF NOT EXISTS chat_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE, message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE, kind TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS chat_event_cursor ON chat_events(conversation_id,sequence);
-      CREATE INDEX IF NOT EXISTS chat_message_rate ON chat_messages(conversation_id,sender_id,created_at);")
+      CREATE INDEX IF NOT EXISTS chat_message_rate ON chat_messages(conversation_id,sender_id,created_at);
+      CREATE TABLE IF NOT EXISTS chat_files(id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE, uploader_id TEXT NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, created_at INTEGER NOT NULL, message_id TEXT);
+      CREATE INDEX IF NOT EXISTS chat_files_conversation ON chat_files(conversation_id,uploader_id,created_at);")?;
+    let has_attachment: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('chat_messages') WHERE name='attachment_id')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_attachment {
+        c.execute_batch("ALTER TABLE chat_messages ADD COLUMN attachment_id TEXT")?;
+    }
+    Ok(())
 }
 pub fn ensure(c: &Connection, sid: &str) -> rusqlite::Result<()> {
     c.execute(
@@ -82,6 +234,12 @@ pub fn prune(c: &Connection, now: i64) -> rusqlite::Result<()> {
     // Explicit deletes also support databases created before foreign_keys was enabled.
     c.execute("DELETE FROM chat_events WHERE conversation_id IN (SELECT id FROM chat_conversations WHERE closed_at <= ?1)", [now-86400])?;
     c.execute("DELETE FROM chat_messages WHERE conversation_id IN (SELECT id FROM chat_conversations WHERE closed_at <= ?1)", [now-86400])?;
+    c.execute("DELETE FROM chat_files WHERE conversation_id IN (SELECT id FROM chat_conversations WHERE closed_at <= ?1)", [now-86400])?;
+    // Subidas que nunca se enviaron.
+    c.execute(
+        "DELETE FROM chat_files WHERE message_id IS NULL AND created_at <= ?1",
+        [now - 3600],
+    )?;
     c.execute(
         "DELETE FROM chat_conversations WHERE closed_at <= ?1",
         [now - 86400],
@@ -89,9 +247,13 @@ pub fn prune(c: &Connection, now: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 fn message(c: &Connection, id: &str) -> rusqlite::Result<Value> {
-    c.query_row("SELECT m.id,m.conversation_id,m.sender_id,m.sender_name,m.sender_role,m.text,m.created_at,m.deleted,m.client_message_id,(SELECT MIN(sequence) FROM chat_events WHERE message_id=m.id) FROM chat_messages m WHERE m.id=?1",[id],|r| {
+    c.query_row("SELECT m.id,m.conversation_id,m.sender_id,m.sender_name,m.sender_role,m.text,m.created_at,m.deleted,m.client_message_id,(SELECT MIN(sequence) FROM chat_events WHERE message_id=m.id),f.id,f.name,f.mime,f.size FROM chat_messages m LEFT JOIN chat_files f ON f.id=m.attachment_id AND f.message_id=m.id WHERE m.id=?1",[id],|r| {
         let deleted = r.get::<_,bool>(7)?;
-        Ok(json!({"id":r.get::<_,String>(0)?,"conversation_id":r.get::<_,String>(1)?,"sender_id":r.get::<_,String>(2)?,"sender_name":r.get::<_,String>(3)?,"sender_role":r.get::<_,String>(4)?,"text":if deleted {String::new()} else {r.get::<_,String>(5)?},"created_at":r.get::<_,i64>(6)?,"deleted":deleted,"client_message_id":r.get::<_,String>(8)?,"sequence":r.get::<_,i64>(9)?}))
+        let attachment = match (deleted, r.get::<_,Option<String>>(10)?) {
+            (false, Some(file)) => json!({"id":file,"name":r.get::<_,String>(11)?,"mime":r.get::<_,String>(12)?,"size":r.get::<_,i64>(13)?}),
+            _ => Value::Null,
+        };
+        Ok(json!({"id":r.get::<_,String>(0)?,"conversation_id":r.get::<_,String>(1)?,"sender_id":r.get::<_,String>(2)?,"sender_name":r.get::<_,String>(3)?,"sender_role":r.get::<_,String>(4)?,"text":if deleted {String::new()} else {r.get::<_,String>(5)?},"created_at":r.get::<_,i64>(6)?,"deleted":deleted,"client_message_id":r.get::<_,String>(8)?,"sequence":r.get::<_,i64>(9)?,"attachment":attachment}))
     })
 }
 pub fn page(c: &Connection, sid: &str, p: &Page) -> Result<Value> {
@@ -166,13 +328,13 @@ pub fn send(
     now: i64,
 ) -> Result<Value> {
     let text = b.text.trim();
-    if text.is_empty()
+    if (text.is_empty() && b.attachment_id.is_none())
         || text.chars().count() > 2000
         || text.len() > 8192
         || uuid::Uuid::parse_str(&b.client_message_id).is_err()
     {
         return Err(Failure::Invalid(
-            "Escribe entre 1 y 2.000 caracteres y usa un identificador de envío válido",
+            "Escribe hasta 2.000 caracteres o adjunta un archivo, con un identificador de envío válido",
         ));
     }
     let tx = c.transaction()?;
@@ -193,7 +355,17 @@ pub fn send(
         return Err(Failure::Limited);
     }
     let id = uuid::Uuid::new_v4().to_string();
-    tx.execute("INSERT INTO chat_messages(id,conversation_id,sender_id,sender_name,sender_role,text,created_at,client_message_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![id,sid,sender,name,role,text,now,b.client_message_id])?;
+    if let Some(file) = &b.attachment_id {
+        // Solo un archivo propio, de esta conversación y aún sin enviar.
+        let claimed = tx.execute(
+            "UPDATE chat_files SET message_id=?1 WHERE id=?2 AND conversation_id=?3 AND uploader_id=?4 AND message_id IS NULL",
+            params![id, file, sid, sender],
+        )?;
+        if claimed == 0 {
+            return Err(Failure::Invalid("El archivo adjunto ya no está disponible"));
+        }
+    }
+    tx.execute("INSERT INTO chat_messages(id,conversation_id,sender_id,sender_name,sender_role,text,created_at,client_message_id,attachment_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![id,sid,sender,name,role,text,now,b.client_message_id,b.attachment_id])?;
     tx.execute(
         "INSERT INTO chat_events(conversation_id,message_id,kind) VALUES(?1,?2,'chat.message')",
         params![sid, id],
@@ -218,10 +390,96 @@ pub fn delete(c: &mut Connection, sid: &str, id: &str) -> Result<Value> {
             "INSERT INTO chat_events(conversation_id,message_id,kind) VALUES(?1,?2,'chat.deleted')",
             params![sid, id],
         )?;
+        // Borrar el mensaje borra su archivo; `sweep` lo quita del disco.
+        tx.execute("DELETE FROM chat_files WHERE message_id=?1", [id])?;
     }
     let result = message(&tx, id)?;
     tx.commit()?;
     Ok(result)
+}
+/// Registra un archivo ya guardado en disco. Comprueba la conversación, la
+/// frecuencia (10 por minuto y persona) y el total de la conversación.
+#[allow(clippy::too_many_arguments)]
+pub fn add_file(
+    c: &mut Connection,
+    sid: &str,
+    file: &str,
+    uploader: &str,
+    name: &str,
+    mime: &str,
+    size: u64,
+    now: i64,
+) -> Result<Value> {
+    let tx = c.transaction()?;
+    let active: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chat_conversations WHERE id=?1 AND closed_at IS NULL)",
+        [sid],
+        |r| r.get(0),
+    )?;
+    if !active {
+        return Err(Failure::Closed);
+    }
+    let recent: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM chat_files WHERE conversation_id=?1 AND uploader_id=?2 AND created_at>?3",
+        params![sid, uploader, now - 60],
+        |r| r.get(0),
+    )?;
+    if recent >= 10 {
+        return Err(Failure::Limited);
+    }
+    let total: i64 = tx.query_row(
+        "SELECT COALESCE(SUM(size),0) FROM chat_files WHERE conversation_id=?1",
+        [sid],
+        |r| r.get(0),
+    )?;
+    if total + size as i64 > MAX_CONVERSATION_FILES {
+        return Err(Failure::Invalid(
+            "El chat llegó a 200 MB de archivos: borra alguno para compartir más",
+        ));
+    }
+    tx.execute(
+        "INSERT INTO chat_files(id,conversation_id,uploader_id,name,mime,size,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![file, sid, uploader, name, mime, size as i64, now],
+    )?;
+    tx.commit()?;
+    Ok(json!({"id":file,"name":name,"mime":mime,"size":size}))
+}
+/// Nombre y tipo de un archivo enviado en un mensaje vigente de la conversación activa.
+pub fn file(c: &Connection, sid: &str, id: &str) -> Result<(String, String)> {
+    c.query_row(
+        "SELECT f.name,f.mime FROM chat_files f JOIN chat_messages m ON m.id=f.message_id JOIN chat_conversations v ON v.id=f.conversation_id WHERE f.id=?1 AND f.conversation_id=?2 AND m.deleted=0 AND v.closed_at IS NULL",
+        params![id, sid],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()?
+    .ok_or(Failure::Invalid("Archivo no disponible"))
+}
+/// Quita del disco los archivos que ya no figuran en la base (borrados, caducados
+/// o de subidas fallidas). Las subidas en curso (`.part`) se respetan una hora.
+pub fn sweep(c: &Connection, dir: &std::path::Path) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    let mut q = c.prepare("SELECT EXISTS(SELECT 1 FROM chat_files WHERE id=?1)")?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let age = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map_or(0, |age| age.as_secs());
+        // Un archivo recién guardado aún puede estar registrándose.
+        let keep = if name.ends_with(".part") {
+            age <= 3600
+        } else {
+            age < 120 || q.query_row([&name], |r| r.get::<_, bool>(0))?
+        };
+        if !keep {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -236,6 +494,7 @@ mod tests {
     }
     fn body(text: &str) -> Send {
         Send {
+            attachment_id: None,
             session_id: "a".into(),
             client_message_id: uuid::Uuid::new_v4().to_string(),
             text: text.into(),
