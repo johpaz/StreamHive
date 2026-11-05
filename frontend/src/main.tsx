@@ -224,7 +224,10 @@ function App() {
     });
   return (
     <div className={`app-shell ${sidebarClosed ? "sidebar-collapsed" : ""} ${focused ? "focus-mode" : ""}`}>
-      {admitted && <StudioChat key={me.id} me={me} />}
+      {/* El chat incluye a quienes esperan entrar, para coordinar el ingreso. */}
+      {(admitted ||
+        studio?.participants.find((p) => p.id === me.id)?.status ===
+          "waiting") && <StudioChat key={me.id} me={me} />}
       <DesktopRenderer key={broadcast?.id} active={admin && running} />
       <aside className="sidebar">
         <button

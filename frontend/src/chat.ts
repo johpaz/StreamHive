@@ -4,7 +4,7 @@ export interface ChatMessage {
   conversation_id: string;
   sender_id: string;
   sender_name: string;
-  sender_role: "admin" | "guest";
+  sender_role: "admin" | "guest" | "waiting";
   text: string;
   created_at: number;
   deleted: boolean;

@@ -463,26 +463,25 @@ async fn chat_requires_admission_is_scoped_and_recovers_moderation() {
     let (cookie, g) = join_guest(&s, &i, "Ana 🐝").await;
     let pid = g["participant_id"].as_str().unwrap();
     let path = format!("/api/v1/chat/messages?session_id={sid}");
+    // En sala de espera ya se lee y se escribe, para coordinar el ingreso.
     assert_eq!(
         call(&s, "GET", &path, None, Some(&cookie), Value::Null)
             .await
             .0,
-        StatusCode::UNAUTHORIZED
+        StatusCode::OK
     );
+    let early = call(
+        &s,
+        "POST",
+        "/api/v1/chat/messages",
+        None,
+        Some(&cookie),
+        json!({"session_id":sid,"client_message_id":id(),"text":"Estoy lista"}),
+    )
+    .await;
+    assert_eq!(early.0, StatusCode::OK);
+    assert_eq!(early.2["sender_role"], "waiting");
     let payload = json!({"session_id":sid,"client_message_id":id(),"text":"Hola 🐝"});
-    assert_eq!(
-        call(
-            &s,
-            "POST",
-            "/api/v1/chat/messages",
-            None,
-            Some(&cookie),
-            payload.clone()
-        )
-        .await
-        .0,
-        StatusCode::UNAUTHORIZED
-    );
     call(
         &s,
         "POST",
@@ -520,7 +519,24 @@ async fn chat_requires_admission_is_scoped_and_recovers_moderation() {
     let page = call(&restored, "GET", &path, Some(&owner), None, Value::Null)
         .await
         .2;
-    assert_eq!(page["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(page["messages"].as_array().unwrap().len(), 2);
+    let (rejected_cookie, rejected) = join_guest(&s, &i, "Luis").await;
+    let rejected_id = rejected["participant_id"].as_str().unwrap();
+    call(
+        &s,
+        "POST",
+        &format!("/api/v1/sessions/{sid}/participants/{rejected_id}"),
+        Some(&owner),
+        None,
+        json!({"action":"reject"}),
+    )
+    .await;
+    assert_eq!(
+        call(&s, "GET", &path, None, Some(&rejected_cookie), Value::Null)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
     let delete = format!(
         "/api/v1/chat/messages/{}?session_id={sid}",
         sent.2["id"].as_str().unwrap()

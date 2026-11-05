@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { api, ApiError } from "./api";
 import { ChatBee } from "./ChatBee";
@@ -22,6 +23,62 @@ type Pending = {
   failed: boolean;
   conversation: string;
 };
+/** Altura que ocupa la barra de emisión fija al fondo de la ventana. El chat
+ * flotante se coloca encima para no tapar Grabar ni Finalizar directo. */
+function useBroadcastBarLift() {
+  const [lift, setLift] = useState(0);
+  useEffect(() => {
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      const bar = document.querySelector<HTMLElement>(
+        ".workspace-broadcast-bar",
+      );
+      const rect = bar?.getBoundingClientRect();
+      // Solo cuando la barra está pegada al fondo (o lo pisa); si está a media
+      // pantalla por el desplazamiento, el chat sigue en su esquina.
+      const next =
+        rect &&
+        rect.height > 0 &&
+        rect.top < window.innerHeight &&
+        rect.bottom > window.innerHeight - 48
+          ? Math.ceil(window.innerHeight - rect.top)
+          : 0;
+      setLift((prev) => (prev === next ? prev : next));
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    measure();
+    const resize = new ResizeObserver(schedule);
+    let observed: Element | null = null;
+    const watch = () => {
+      const bar = document.querySelector(".workspace-broadcast-bar");
+      if (bar === observed) return;
+      resize.disconnect();
+      observed = bar;
+      if (bar) resize.observe(bar);
+      schedule();
+    };
+    watch();
+    const mutations = new MutationObserver(watch);
+    mutations.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("resize", schedule);
+    document.addEventListener("scroll", schedule, {
+      capture: true,
+      passive: true,
+    });
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      resize.disconnect();
+      mutations.disconnect();
+      window.removeEventListener("resize", schedule);
+      document.removeEventListener("scroll", schedule, { capture: true });
+    };
+  }, []);
+  return lift;
+}
+
 export function StudioChat({
   me,
   sessionId,
@@ -33,6 +90,7 @@ export function StudioChat({
   const viewer = useRef(me.id);
   const scroll = useRef(0);
   const [size, setSize] = useState<ChatSize>("reduced");
+  const lift = useBroadcastBarLift();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState<Pending[]>([]);
   const [canReset, setCanReset] = useState(false);
@@ -392,7 +450,10 @@ export function StudioChat({
   };
   const full = size === "full";
   return createPortal(
-    <div className={`studio-chat studio-chat-${size}`}>
+    <div
+      className={`studio-chat studio-chat-${size}`}
+      style={{ "--chat-lift": `${full ? 0 : lift}px` } as CSSProperties}
+    >
       <div
         className="chat-sr-only"
         role="status"
@@ -426,7 +487,7 @@ export function StudioChat({
             <div>
               <strong>Chat general</strong>
               <small>
-                {online ? "Anfitrión e invitados" : "Reconectando…"}
+                {online ? "Directo y sala de espera" : "Reconectando…"}
               </small>
             </div>
             <button
@@ -497,6 +558,9 @@ export function StudioChat({
                 <div className="chat-message-meta">
                   <strong>{m.sender_name}</strong>
                   {m.sender_role === "admin" && <span>Anfitrión</span>}
+                  {m.sender_role === "waiting" && (
+                    <span className="chat-waiting">En sala de espera</span>
+                  )}
                   <time dateTime={new Date(m.created_at * 1000).toISOString()}>
                     {new Date(m.created_at * 1000).toLocaleTimeString("es", {
                       hour: "2-digit",

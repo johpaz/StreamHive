@@ -5061,12 +5061,22 @@ mod api_tests {
         waiting(&s, "guest").await;
         let admin = Some(("host", "admin"));
         let guest = Some(("guest", "guest"));
-        assert_eq!(
-            call(&s, "GET", "/api/v1/chat/messages", guest, Value::Null)
-                .await
-                .0,
-            StatusCode::UNAUTHORIZED
-        );
+        // Quien espera entrar también usa el chat para coordinar su ingreso.
+        let waiting_page = call(&s, "GET", "/api/v1/chat/messages", guest, Value::Null).await;
+        assert_eq!(waiting_page.0, StatusCode::OK);
+        let waiting_sid = waiting_page.2["conversation_id"].as_str().unwrap();
+        let from_waiting = call(
+            &s,
+            "POST",
+            "/api/v1/chat/messages",
+            guest,
+            json!({"session_id":waiting_sid,"client_message_id":uuid::Uuid::new_v4().to_string(),"text":"¿Cuándo entro?"}),
+        )
+        .await;
+        assert_eq!(from_waiting.0, StatusCode::OK);
+        assert_eq!(from_waiting.2["sender_role"], "waiting");
+        let host_page = call(&s, "GET", "/api/v1/chat/messages", admin, Value::Null).await;
+        assert_eq!(host_page.2["messages"][0]["text"], "¿Cuándo entro?");
         s.data
             .lock()
             .await

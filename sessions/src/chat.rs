@@ -31,7 +31,8 @@ async fn actor(s: &App, h: &HeaderMap, sid: &str) -> Result<Actor> {
 fn check(c: &Connection, sid: &str, a: &Actor) -> Result<(String, String, String)> {
     match a {
         Actor::Owner(oid)=>{session_owned(c,sid,oid)?;Ok((oid.clone(),"Anfitrión".into(),"admin".into()))},
-        Actor::Guest(pid)=>c.query_row("SELECT p.id,p.name FROM participants p JOIN sessions s ON s.id=p.session_id JOIN invitations i ON i.id=p.invitation_id WHERE p.id=?1 AND p.session_id=?2 AND p.status='admitted' AND s.closed=0 AND s.expires>?3 AND i.revoked=0 AND i.expires>?3",params![pid,sid,now()],|r|Ok((r.get(0)?,r.get(1)?,"guest".into()))).optional()?.ok_or_else(denied)
+        // Quienes esperan también participan del chat para coordinar su ingreso.
+        Actor::Guest(pid)=>c.query_row("SELECT p.id,p.name,p.status FROM participants p JOIN sessions s ON s.id=p.session_id JOIN invitations i ON i.id=p.invitation_id WHERE p.id=?1 AND p.session_id=?2 AND p.status IN ('admitted','waiting') AND s.closed=0 AND s.expires>?3 AND i.revoked=0 AND i.expires>?3",params![pid,sid,now()],|r|Ok((r.get(0)?,r.get(1)?,if r.get::<_,String>(2)?=="waiting"{"waiting".into()}else{"guest".into()}))).optional()?.ok_or_else(denied)
     }
 }
 pub async fn authorized(s: &App, h: &HeaderMap, sid: &str) -> Result<()> {

@@ -30,7 +30,7 @@ function Guest() {
       {state?.participant&&<p>{state.participant.name}</p>}
       {!closed&&!["removed","rejected"].includes(status??"")&&<p>{!connected?"Reconectando con el servidor…":state?.session.host_online?"El anfitrión está conectado.":"El anfitrión no está conectado. Tu solicitud se conserva."}</p>}
     </>}
-    {!closed&&status==="admitted"&&state?.participant&&<StudioChat key={session+state.participant.id} me={{id:state.participant.id,role:"guest"}} sessionId={session}/>}
+    {!closed&&(status==="admitted"||status==="waiting")&&state?.participant&&<StudioChat key={session+state.participant.id} me={{id:state.participant.id,role:"guest"}} sessionId={session}/>}
     {error&&<p className="error" role="alert">{error}</p>}
     <p className="notice">Esta página gestiona tu entrada. La conexión de cámara y audio todavía no está incluida en esta versión.</p>
   </main>;

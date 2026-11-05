@@ -162,10 +162,21 @@ try {
     p.on("pageerror", (e) => errors.push(e.message));
     const who = await request(ctx, origin, "/join", { token, name });
     await p.goto(origin);
+    // La sala de espera también usa el chat para coordinar el ingreso.
+    await p
+      .getByRole("button", { name: "Abrir chat general", exact: true })
+      .click();
+    const early = `${name} espera su turno`;
+    await p.getByLabel("Mensaje para todos").fill(early);
+    await p.getByRole("button", { name: "Enviar", exact: true }).click();
+    const seen = page.locator(".chat-message").filter({ hasText: early });
+    await seen.waitFor();
     assert(
-      (await p.locator(".studio-chat").count()) === 0,
-      "waiting guest chat hidden",
+      (await seen.locator(".chat-waiting").textContent()) ===
+        "En sala de espera",
+      "waiting guest tagged for the host",
     );
+    await p.getByLabel("Reducir chat").click();
     await request(host, origin, `/participants/${who.id}`, { action: "admit" });
     await p
       .getByRole("button", { name: "Abrir chat general", exact: true })
@@ -202,6 +213,21 @@ try {
   await luis.p.getByRole("button", { name: "Enviar", exact: true }).click();
   await page.getByText("Mensaje de Luis", { exact: true }).waitFor();
   await page.screenshot({ path: join(work, "medium.png") });
+  const overlap = await page.evaluate(() => {
+    const bar = document.querySelector(".workspace-broadcast-bar");
+    const box = document.querySelector(".chat-window");
+    if (!bar || !box) return null;
+    const a = bar.getBoundingClientRect();
+    const b = box.getBoundingClientRect();
+    return {
+      gap: a.top - b.bottom,
+      horizontal: b.left < a.right && b.right > a.left,
+    };
+  });
+  assert(
+    overlap && (!overlap.horizontal || overlap.gap >= 0),
+    `chat window must not cover the broadcast bar: ${JSON.stringify(overlap)}`,
+  );
   await ana.p.screenshot({ path: join(work, "mobile.png") });
   await ana.p.reload();
   await ana.p
@@ -323,10 +349,16 @@ try {
     await p.getByLabel("Tu nombre").fill(name);
     await p.getByRole("button", { name: "Solicitar entrada" }).click();
     await p.getByText("Esperando al anfitrión", { exact: true }).waitFor();
-    assert(
-      (await p.locator(".studio-chat").count()) === 0,
-      "remote waiting hidden",
-    );
+    await p
+      .getByRole("button", { name: "Abrir chat general", exact: true })
+      .click();
+    await p.getByLabel("Mensaje para todos").fill(`${name} en espera`);
+    await p.getByRole("button", { name: "Enviar", exact: true }).click();
+    await p
+      .locator(".chat-message:not(.chat-pending)")
+      .filter({ hasText: `${name} en espera` })
+      .waitFor();
+    await p.getByLabel("Reducir chat").click();
     const state = await request(
       host,
       origin,
@@ -348,6 +380,14 @@ try {
   await page
     .getByRole("button", { name: "Nueva conversación local" })
     .waitFor({ state: "detached", timeout: 12000 });
+  const remoteEarly = page
+    .locator(".chat-message")
+    .filter({ hasText: "Remota Ana en espera" });
+  await remoteEarly.waitFor();
+  assert(
+    (await remoteEarly.locator(".chat-waiting").count()) === 1,
+    "remote waiting guest tagged for the host",
+  );
   const remoteSendTime = Date.now();
   await page
     .getByLabel("Mensaje para todos")
@@ -403,8 +443,8 @@ try {
       scenarios: [
         "three sizes",
         "bee",
-        "local host + two guests",
-        "remote bridge + two guests",
+        "local host + two guests + waiting room",
+        "remote bridge + two guests + waiting room",
         "text safety",
         "unread",
         "reload",

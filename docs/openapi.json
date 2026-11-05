@@ -2289,7 +2289,7 @@
     },
     "/api/v1/chat/messages": {
       "get": {
-        "summary": "Admitted participants: paginated chat history or incremental changes",
+        "summary": "Host, admitted and waiting participants: paginated chat history or incremental changes",
         "security": [
           {
             "session": []
@@ -2353,7 +2353,7 @@
         }
       },
       "post": {
-        "summary": "Admitted participants: send an idempotent plain-text message",
+        "summary": "Host, admitted and waiting participants: send an idempotent plain-text message",
         "security": [
           {
             "session": []
@@ -2925,9 +2925,11 @@
           },
           "sender_role": {
             "type": "string",
+            "description": "waiting: escrito desde la sala de espera",
             "enum": [
               "admin",
-              "guest"
+              "guest",
+              "waiting"
             ]
           },
           "text": {

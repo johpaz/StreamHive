@@ -7,7 +7,7 @@
   --chat-accent: var(--accent, #b9ee79);
   position: fixed;
   right: max(16px, env(safe-area-inset-right));
-  bottom: max(16px, env(safe-area-inset-bottom));
+  bottom: calc(max(16px, env(safe-area-inset-bottom)) + var(--chat-lift, 0px));
   z-index: 45;
   color: var(--chat-text);
   font:
@@ -83,7 +83,7 @@
   width: 360px;
   height: 480px;
   max-width: calc(100vw - 32px);
-  max-height: calc(100dvh - 32px);
+  max-height: calc(100dvh - 32px - var(--chat-lift, 0px));
   background: var(--chat-bg);
   border: 1px solid var(--chat-line);
   border-radius: 18px;
@@ -154,6 +154,10 @@
   border: 1px solid #729c7c;
   border-radius: 4px;
   padding: 0 3px;
+}
+.chat-message-meta .chat-waiting {
+  border-color: #d8b25a;
+  color: #f1d48f;
 }
 .chat-message-meta time {
   margin-left: auto;
@@ -368,7 +372,9 @@
 @media (max-width: 600px) {
   .studio-chat {
     right: max(12px, env(safe-area-inset-right));
-    bottom: max(12px, env(safe-area-inset-bottom));
+    bottom: calc(
+      max(12px, env(safe-area-inset-bottom)) + var(--chat-lift, 0px)
+    );
   }
   .chat-window {
     width: calc(
@@ -376,7 +382,9 @@
     );
     max-width: none;
     height: 480px;
-    max-height: calc(70dvh - env(safe-area-inset-bottom));
+    max-height: calc(
+      70dvh - env(safe-area-inset-bottom) - var(--chat-lift, 0px)
+    );
     border-radius: 16px;
   }
   .chat-composer textarea {

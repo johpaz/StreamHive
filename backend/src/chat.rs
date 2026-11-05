@@ -27,12 +27,18 @@ pub async fn identity(s: &App, h: &HeaderMap) -> Result<(String, String, String)
         return Ok((c.sub, "Anfitrión".into(), "admin".into()));
     }
     let d = s.data.lock().await;
-    let p = d
-        .participants
-        .get(&c.sub)
-        .filter(|p| p.status == "admitted")
-        .ok_or_else(denied)?;
-    Ok((c.sub, p.name.clone(), "guest".into()))
+    let p = d.participants.get(&c.sub).ok_or_else(denied)?;
+    let role = guest_role(&p.status).ok_or_else(denied)?;
+    Ok((c.sub, p.name.clone(), role.into()))
+}
+/// El chat es para todas las personas del estudio: quienes están en el directo
+/// y quienes esperan entrar, para coordinar ingresos. Las retiradas no lo ven.
+pub fn guest_role(status: &str) -> Option<&'static str> {
+    match status {
+        "admitted" => Some("guest"),
+        "waiting" => Some("waiting"),
+        _ => None,
+    }
 }
 async fn local<T: Send + 'static>(
     s: &App,
@@ -57,7 +63,7 @@ pub async fn history(State(s): State<App>, h: HeaderMap, Query(p): Query<db::Pag
         && !d
             .participants
             .get(&s.auth(&h)?.sub)
-            .is_some_and(|p| p.status == "admitted")
+            .is_some_and(|p| guest_role(&p.status).is_some())
     {
         return Err(denied());
     }
@@ -93,7 +99,7 @@ pub async fn send(State(s): State<App>, h: HeaderMap, Json(b): Json<db::Send>) -
         && !d
             .participants
             .get(&id)
-            .is_some_and(|p| p.status == "admitted")
+            .is_some_and(|p| guest_role(&p.status).is_some())
     {
         return Err(denied());
     }
