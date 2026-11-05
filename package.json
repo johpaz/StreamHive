@@ -6,7 +6,7 @@
     "check": "bash scripts/check.sh",
     "media:install": "bun scripts/install-livekit.mjs",
     "test:browser": "bun run dev --smoke",
-    "test:chat": "bun scripts/build-session-guest.mjs && cargo build --workspace --locked && bun --cwd frontend run build && bun scripts/chat-e2e.mjs"
+    "test:chat": "bun scripts/build-session-guest.mjs && cargo build --workspace --locked && (cd frontend && bun run build) && bun scripts/chat-e2e.mjs"
   },
   "devDependencies": {
     "playwright": "1.64.0"

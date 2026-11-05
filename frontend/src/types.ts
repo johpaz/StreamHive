@@ -1,4 +1,4 @@
-export type Layout = "grid" | "spotlight" | "screen";
+export type Layout = "grid" | "spotlight" | "featured" | "screen";
 export type OutputFormat = "landscape" | "portrait";
 export type DestinationStatus = "ready" | "disabled" | "connecting" | "live" | "reconnecting" | "finished";
 export const destinationLabels: Record<DestinationStatus, string> = {
@@ -15,9 +15,36 @@ export interface Asset {
   name: string;
   filename: string;
   mime: string;
-  kind: "image" | "video";
+  kind: "image" | "video" | "audio";
   bytes: number;
   created: number;
+}
+export type SlateKind = "start" | "pause" | "end";
+export type SlateStyle = "colmena" | "aurora" | "lineas" | "liso";
+export interface Slate {
+  style: SlateStyle;
+  accent: string;
+  brand_line: string;
+  logo_position: "top" | "corner";
+  logo_asset: string | null;
+  title: string;
+  subtitle: string;
+  timer_seconds: number;
+  timer_label: string;
+  done_label: string;
+  background: string;
+  background_asset: string | null;
+  show_logo: boolean;
+  music_asset: string | null;
+  music_volume: number;
+  auto_on_timer_end: boolean;
+  show_on_go_live: boolean;
+}
+export type Slates = Record<SlateKind, Slate>;
+export interface ActiveSlate {
+  kind: SlateKind;
+  started_at_ms: number;
+  ends_at_ms: number | null;
 }
 export interface Playback {
   playing: boolean;
@@ -59,6 +86,8 @@ export interface Broadcast {
   error: string | null;
   renderer_revision: number | null;
   renderer_revisions?: Record<string, number>;
+  live?: boolean;
+  recording?: boolean;
 }
 export interface Studio {
   program: Program;
@@ -68,7 +97,12 @@ export interface Studio {
   broadcast: Broadcast | null;
   destination_configured: boolean;
   destinations?: Destination[];
+  /// Si cada servicio puede cambiar con la sesión en marcha (motor local).
+  independent_services?: boolean;
   assets: Asset[];
+  limits?: { on_screen: number; admitted: number; max_admitted: number };
+  slates?: Slates;
+  active_slate?: ActiveSlate | null;
   server_time_ms: number;
   clock_offset?: number;
 }
@@ -84,6 +118,16 @@ export interface Recording {
   status: string;
   bytes: number;
   duration: number;
+  location?: string;
+}
+export interface RecordingsLocation {
+  path: string;
+  default_path: string;
+  is_default: boolean;
+  editable: boolean;
+  locked: boolean;
+  available: boolean;
+  free_bytes: number | null;
 }
 export interface Health {
   free_bytes: number;

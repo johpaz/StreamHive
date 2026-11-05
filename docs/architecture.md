@@ -40,7 +40,7 @@ Se persiste la sesión antes de llamar al servicio externo. Una respuesta ambigu
 
 La reconciliación consulta cada cinco segundos el estado de Egress y participantes. Webhooks firmados verifican emisor, firma, expiración y SHA-256 del cuerpo original; no deciden estados terminales de emisión basándose en el orden de entrega. La desaparición de una pantalla se procesa por webhook y también por reconciliación.
 
-Se mantiene una grabación independiente por sesión. Solo un EGRESS_COMPLETE con archivo presente se ofrece como descarga finalizada. Los errores mantienen el archivo como interrumpido; no se promete integridad tras un crash del compositor o del host.
+Emisión y grabación son servicios independientes de una sesión de salida, que sigue activa mientras alguno lo esté. Con el motor local se activan y detienen por separado en cualquier momento, y una sesión puede producir varias grabaciones. Egress fija sus salidas al iniciar, así que allí los servicios se eligen al arrancar y se finalizan juntos. Con el motor local, la carpeta de destino se guarda en los ajustes y se valida al elegirla y al empezar cada grabación: si deja de estar disponible se avisa, nunca se graba en otra. Cada grabación conserva su carpeta. Con Egress la define el despliegue. Solo un EGRESS_COMPLETE con archivo presente se ofrece como descarga finalizada. Los errores mantienen el archivo como interrumpido; no se promete integridad tras un crash del compositor o del host.
 
 Los timeouts de API son de 20 segundos. Un servicio multimedia caído puede retrasar los controles de producción o impedir una parada ordenada: el panel debe mostrar el fallo, y la recuperación operativa debe comprobar LiveKit/Egress antes de reiniciar otra emisión. Los avisos y límites de disco son preventivos, no una garantía contra fallos de almacenamiento.
 
@@ -89,12 +89,20 @@ El anfitrión elige **Identidad del programa → Fondo del escenario**: color s�
 
 Referencias: [procesadores oficiales de LiveKit](https://github.com/livekit/track-processors-js/blob/main/processor-docs/video-processors.md), [ciclo de vida de LocalTrack en SDK 2.23.0](https://github.com/livekit/client-sdk-js/blob/v2.23.0/src/room/track/LocalTrack.ts).
 
+## Pantallas de inicio, pausa y fin
+
+`Data.slates` guarda la configuración y `Data.active_slate` la pantalla al aire. Viven fuera de `Program` para que los dos formatos cambien a la vez, las escenas no las capturen y el programa se pueda preparar debajo.
+
+El compositor conserva la misma raíz `.stage`, porque la captura guarda esa referencia. `slateProgram` deriva un programa sin personas, micrófonos ni contenido; `Stage` lo dibuja y `Renderer` lo usa con `allowedTrack`, de modo que esas pistas ni se suscriben. La música es un `<audio>` que solo monta el renderer y que `AudioMixer` engancha a la mezcla.
+
+El fin del temporizador lo aplica una tarea de `tokio` si sigue al aire esa misma pantalla; `reconcile` hace de respaldo. La pantalla activa se limpia al terminar la sesión y al arrancar el servidor.
+
 ## Programas horizontal y vertical
 
 `Data.program` conserva el programa 16:9 y `Data.portrait_program` guarda el 9:16. Cada uno tiene su propia revisión. Las escenas guardadas contienen nombre, formato y una copia del programa; activarlas incrementa la revisión del formato correspondiente. Retirar participantes limpia ambos programas y las escenas. El acceso a archivos del renderer y la protección contra borrado consideran ambos programas; las escenas guardadas también protegen los archivos referenciados.
 
 Los destinos se agrupan por formato al iniciar. Solo se crean compositores para los formatos con destinos activos: 1920×1080 y/o 1080×1920. Cada grupo tiene un trabajo de Egress o FFmpeg, un MP4 y un identificador de salida en `Broadcast.outputs`. El segundo MP4 usa el sufijo `-portrait`. Las credenciales de los dos renderers locales tienen identidades LiveKit distintas para que no se expulsen entre sí. El token del renderer sigue limitado a la emisión activa.
 
-FFmpeg codifica H.264/AAC una vez por formato y reparte MPEG-TS mediante un canal de memoria acotado. Cada destino tiene un proceso FFmpeg que solo remultiplexa a FLV/RTMP, con tiempo máximo de escritura y reconexión independiente. El progreso de ese publicador determina su estado; no se infiere del proceso de grabación. Al reconectar se espera suficiente información para recibir un fotograma clave y recuperar los parámetros de H.264. La grabación y los demás destinos no esperan a una conexión caída.
+FFmpeg codifica H.264/AAC una vez por formato y reparte MPEG-TS mediante un canal de memoria acotado. Cada destino tiene un proceso FFmpeg que solo remultiplexa a FLV/RTMP, con tiempo máximo de escritura y reconexión independiente. El progreso de ese publicador determina su estado; no se infiere del proceso de grabación. Al reconectar se espera suficiente información para recibir un fotograma clave y recuperar los parámetros de H.264. La grabación es otro suscriptor del mismo canal: copia a MP4 sin recodificar y nunca frena al encoder, por lo que un disco incapaz de seguir el ritmo deja huecos en el archivo. La grabación y los demás destinos no esperan a una conexión caída.
 
 La reconciliación conserva el último intento de **cada URL** y traduce los resultados a IDs de destinos antes de persistir o responder al navegador. Las URLs y claves no se guardan en `Broadcast.destination_statuses` ni salen en las respuestas. Reintentar una salida sana no la vuelve a añadir. El servidor de un destino también se cifra por separado para permitir renovar la clave sin devolver las credenciales guardadas.

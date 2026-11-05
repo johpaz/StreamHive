@@ -1,6 +1,8 @@
 import { describe, it, expect } from "bun:test";
 import {
   cameraPositions,
+  featuredPositions,
+  visibleIdentities,
   playbackTime,
   playbackFinished,
   assetUrl,
@@ -101,5 +103,37 @@ describe("layerDimensions", () => {
   it("pide el tamaño real del cuadro, redondeado hacia arriba y nunca 0", () => {
     expect(ld({ width: 575.2, height: 323.9 })).toEqual({ width: 576, height: 324 });
     expect(ld({ width: 0, height: 0.2 })).toEqual({ width: 1, height: 1 });
+  });
+});
+
+describe("featured layout and visible cameras", () => {
+  const inside = (r: { left: number; top: number; width: number; height: number }) =>
+    r.left >= 0 && r.top >= 0 && r.left + r.width <= 100.01 && r.top + r.height <= 100.01;
+  const overlap = (a: any, b: any) =>
+    a.left < b.left + b.width - 0.01 && b.left < a.left + a.width - 0.01 &&
+    a.top < b.top + b.height - 0.01 && b.top < a.top + a.height - 0.01;
+  for (const format of ["landscape", "portrait"] as const)
+    for (let count = 1; count <= 6; count++)
+      it(`${format} with ${count} fits without overlaps and keeps the lead largest`, () => {
+        const rects = featuredPositions(count, format);
+        expect(rects.length).toBe(count);
+        for (const r of rects) expect(inside(r)).toBe(true);
+        for (let i = 0; i < count; i++)
+          for (let j = i + 1; j < count; j++) expect(overlap(rects[i], rects[j])).toBe(false);
+        for (const r of rects.slice(1))
+          expect(r.width * r.height).toBeLessThan(rects[0].width * rects[0].height);
+      });
+  it("landscape tiles stay 16:9", () => {
+    for (const r of featuredPositions(6)) expect(r.width).toBe(r.height);
+  });
+  it("says who is visible per composition", () => {
+    const base = { ...initialProgram, identities: ["a", "b", "c"], spotlight: "b" };
+    expect(visibleIdentities({ ...base, layout: "grid" })).toEqual(["a", "b", "c"]);
+    expect(visibleIdentities({ ...base, layout: "spotlight" })).toEqual(["b"]);
+    expect(visibleIdentities({ ...base, layout: "featured" })).toEqual(["b", "a", "c"]);
+    expect(visibleIdentities({ ...base, layout: "featured", spotlight: null })).toEqual(["a", "b", "c"]);
+    expect(visibleIdentities({ ...base, layout: "screen", content_mode: "side" })).toEqual(["a", "b", "c"]);
+    expect(visibleIdentities({ ...base, layout: "screen", content_mode: "pip" })).toEqual(["b"]);
+    expect(visibleIdentities({ ...base, layout: "screen", content_mode: "full" })).toEqual([]);
   });
 });

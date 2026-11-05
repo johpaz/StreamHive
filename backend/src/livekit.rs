@@ -67,8 +67,16 @@ impl LiveKit {
         Ok(())
     }
 }
-pub fn egress_request(path: &str, template: &str, destinations: &[String]) -> Value {
-    json!({"room_name":ROOM,"template":{"custom_base_url":template,"layout":"streamhive"},"advanced":{"width":1920,"height":1080,"framerate":30,"video_codec":"H264_MAIN","video_bitrate":6000,"audio_codec":"AAC","audio_bitrate":160},"outputs":[{"file":{"file_type":"MP4","filepath":path,"disable_manifest":true}},{"stream":{"protocol":"RTMP","urls":destinations}}]})
+/// Solo incluye las salidas de los servicios activos: sin archivo no se graba y sin URL no se emite.
+pub fn egress_request(path: Option<&str>, template: &str, destinations: &[String]) -> Value {
+    let mut outputs = Vec::new();
+    if let Some(path) = path {
+        outputs.push(json!({"file":{"file_type":"MP4","filepath":path,"disable_manifest":true}}));
+    }
+    if !destinations.is_empty() {
+        outputs.push(json!({"stream":{"protocol":"RTMP","urls":destinations}}));
+    }
+    json!({"room_name":ROOM,"template":{"custom_base_url":template,"layout":"streamhive"},"advanced":{"width":1920,"height":1080,"framerate":30,"video_codec":"H264_MAIN","video_bitrate":6000,"audio_codec":"AAC","audio_bitrate":160},"outputs":outputs})
 }
 #[cfg(test)]
 mod tests {
@@ -76,7 +84,7 @@ mod tests {
     #[test]
     fn one_encode_has_file_and_stream_outputs() {
         let v = egress_request(
-            "/recordings/id.mp4",
+            Some("/recordings/id.mp4"),
             "http://app/render",
             &["rtmps://x/k".to_string(), "rtmp://y/k".to_string()],
         );
@@ -88,5 +96,15 @@ mod tests {
             v["outputs"][1]["stream"]["urls"].as_array().unwrap().len(),
             2
         );
+    }
+    #[test]
+    fn each_service_only_adds_its_own_output() {
+        let urls = ["rtmps://x/k".to_string()];
+        let live = egress_request(None, "http://app/render", &urls);
+        assert_eq!(live["outputs"].as_array().unwrap().len(), 1);
+        assert!(live["outputs"][0].get("stream").is_some());
+        let recording = egress_request(Some("/recordings/id.mp4"), "http://app/render", &[]);
+        assert_eq!(recording["outputs"].as_array().unwrap().len(), 1);
+        assert!(recording["outputs"][0].get("file").is_some());
     }
 }

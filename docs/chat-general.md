@@ -60,3 +60,7 @@ La prueba de navegador usa bases temporales, puertos libres y Chromium; no lee c
 - `scripts/chat-e2e.mjs`: anfitrión y dos invitados en cada modo, notificaciones en tiempo real, tres tamaños, foco, borrador, posición de lectura, no leídos, texto seguro, recarga, desconexión, reintento, borrado durante un corte, móvil, movimiento reducido, reinicio, expulsión y cierre remoto. Guarda capturas de escritorio y móvil en su directorio temporal.
 
 La validación de navegador usa Chromium en la misma máquina. No certifica Safari/iOS, teclado físico de un dispositivo móvil ni redes externas; no se desplegó esta versión al VPS.
+
+## Diseño previo
+
+Se conserva el [diseño previo del chat](chat-general-diseno-previo.md) como referencia histórica. Incluye propuestas distintas (sala de espera, adjuntos y moderadores delegados) que no forman parte de esta implementación del chat flotante.

@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 import { BrandMark } from "./Brand";
+import { SlateView } from "./SlateView";
+import { slateProgram, type ShownSlate } from "./slate";
 import type { Program, Asset, OutputFormat } from "./types";
 import {
   participants,
@@ -10,6 +12,8 @@ import {
 } from "./media";
 import {
   cameraPositions,
+  featuredPositions,
+  visibleIdentities,
   playbackTime,
   playbackFinished,
   assetUrl,
@@ -166,7 +170,9 @@ function AssetView({
 }
 export function Stage({
   format = "landscape",
-  program,
+  program: base,
+  slate = null,
+  slatePreview = false,
   room,
   names = {},
   renderer = false,
@@ -180,6 +186,9 @@ export function Stage({
   previewAudio = false,
 }: {
   program: Program;
+  /** Pantalla al aire: sustituye al programa dentro de la misma raíz `.stage`. */
+  slate?: ShownSlate | null;
+  slatePreview?: boolean;
   format?: OutputFormat;
   room: MediaRoom | null;
   names?: Record<string, string>;
@@ -194,28 +203,16 @@ export function Stage({
   previewAudio?: boolean;
 }) {
   const backgroundRef = useRef<HTMLImageElement>(null);
+  const program = slate ? slateProgram(base, slate.slate) : base;
   const people = participants(room);
   const find = (id: string) => people.find((p) => p.identity === id);
   const content = program.layout === "screen";
   const mode = program.content_mode || "side";
-  const ids =
-    program.layout === "spotlight"
-      ? program.spotlight
-        ? [program.spotlight]
-        : []
-      : content && mode === "pip"
-        ? program.identities.length
-          ? [
-              program.spotlight &&
-              program.identities.includes(program.spotlight)
-                ? program.spotlight
-                : program.identities[0],
-            ]
-          : []
-        : content && mode === "full"
-          ? []
-          : program.identities;
-  const positions = cameraPositions(ids.length, format);
+  const ids = visibleIdentities(program);
+  const positions =
+    program.layout === "featured"
+      ? featuredPositions(ids.length, format)
+      : cameraPositions(ids.length, format);
   const screen =
     content && program.screen
       ? publication(find(program.screen), "screen_share")
@@ -317,7 +314,18 @@ export function Stage({
           );
         })}
       </div>
-      {!ids.length && !content && !backgroundAsset && (
+      {slate && (
+        <SlateView
+          shown={slate}
+          clockOffset={clockOffset}
+          renderer={renderer}
+          renderToken={renderToken}
+          preview={slatePreview}
+          format={format}
+          programLogo={base.logo}
+        />
+      )}
+      {!slate && !ids.length && !content && !backgroundAsset && (
         <div className="stage-empty">
           <div className="stage-orbit">
             <BrandMark className="stage-brand-mark" />

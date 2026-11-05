@@ -750,7 +750,7 @@
     },
     "/api/v1/broadcast/start": {
       "post": {
-        "summary": "Admin: idempotently start RTMP and automatic MP4",
+        "summary": "Admin: idempotently activate the live service; record=true also activates recording",
         "responses": {
           "200": {
             "description": "Success",
@@ -789,12 +789,23 @@
           "502": {
             "description": "Media service or persistence unavailable"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "record",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ]
       }
     },
     "/api/v1/broadcast/stop": {
       "post": {
-        "summary": "Admin: request graceful completion; poll until finalized",
+        "summary": "Admin: stop the live service, keeping an active recording; all=true ends the whole session",
         "responses": {
           "200": {
             "description": "Success",
@@ -829,7 +840,18 @@
           "502": {
             "description": "Media service or persistence unavailable"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "all",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ]
       }
     },
     "/api/v1/broadcast/retry": {
@@ -879,6 +901,90 @@
             }
           }
         ]
+      }
+    },
+    "/api/v1/recording/start": {
+      "post": {
+        "summary": "Admin: idempotently activate the recording service; no destination required",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/recording/stop": {
+      "post": {
+        "summary": "Admin: stop the recording service, keeping an active live service",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
       }
     },
     "/api/v1/renderer/state": {
@@ -1020,6 +1126,142 @@
             "renderer": []
           }
         ]
+      }
+    },
+    "/api/v1/settings/recordings": {
+      "get": {
+        "summary": "Admin: current and default recordings folder",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "default_path": {
+                      "type": "string"
+                    },
+                    "is_default": {
+                      "type": "boolean"
+                    },
+                    "editable": {
+                      "type": "boolean"
+                    },
+                    "locked": {
+                      "type": "boolean"
+                    },
+                    "available": {
+                      "type": "boolean"
+                    },
+                    "free_bytes": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "default_path",
+                    "is_default",
+                    "editable",
+                    "locked",
+                    "available"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          }
+        }
+      },
+      "put": {
+        "summary": "Admin: choose the folder for new recordings; null path restores the default",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "default_path": {
+                      "type": "string"
+                    },
+                    "is_default": {
+                      "type": "boolean"
+                    },
+                    "editable": {
+                      "type": "boolean"
+                    },
+                    "locked": {
+                      "type": "boolean"
+                    },
+                    "available": {
+                      "type": "boolean"
+                    },
+                    "free_bytes": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "default_path",
+                    "is_default",
+                    "editable",
+                    "locked",
+                    "available"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          }
+        }
       }
     },
     "/api/v1/recordings": {
@@ -1829,6 +2071,221 @@
           }
         }
       ]
+    },
+    "/api/v1/slates/{kind}": {
+      "put": {
+        "summary": "Configure the start, pause or end slate (admin)",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "start",
+                "pause",
+                "end"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "title"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "subtitle": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "timer_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 21600
+                  },
+                  "timer_label": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "done_label": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "background": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{6}$"
+                  },
+                  "background_asset": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "show_logo": {
+                    "type": "boolean"
+                  },
+                  "music_asset": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "music_volume": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "auto_on_timer_end": {
+                    "type": "boolean"
+                  },
+                  "show_on_go_live": {
+                    "type": "boolean"
+                  },
+                  "style": {
+                    "type": "string",
+                    "enum": [
+                      "colmena",
+                      "aurora",
+                      "lineas",
+                      "liso"
+                    ]
+                  },
+                  "accent": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{6}$"
+                  },
+                  "brand_line": {
+                    "type": "string",
+                    "maxLength": 60
+                  },
+                  "logo_position": {
+                    "type": "string",
+                    "enum": [
+                      "top",
+                      "corner"
+                    ]
+                  },
+                  "logo_asset": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/slates/{kind}/show": {
+      "post": {
+        "summary": "Put a slate on air, replacing cameras, microphones and content in every format (admin)",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "start",
+                "pause",
+                "end"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/slates/hide": {
+      "post": {
+        "summary": "Return to the program (admin)",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/settings/limits": {
+      "put": {
+        "summary": "Set the guest quota for the room and the camera quota on screen (admin)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "on_screen",
+                  "admitted"
+                ],
+                "properties": {
+                  "on_screen": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 6
+                  },
+                  "admitted": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
     },
     "/api/v1/chat/messages": {
       "get": {

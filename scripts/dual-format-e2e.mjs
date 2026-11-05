@@ -54,13 +54,13 @@ try {
   await request("/program", { ...state.program, background: "#112233" }, "PUT");
   await page.getByLabel("Nombre de la escena").fill("Horizontal QA");
   await page.getByRole("button", { name: "Guardar escena actual" }).click();
-  await page.getByRole("button", { name: "Horizontal QA", exact: true }).waitFor();
+  await page.getByRole("list", { name: "Escenas guardadas" }).getByText("Horizontal QA", { exact: true }).waitFor();
   await page.getByLabel("Composición", { exact: true }).selectOption("portrait");
   state = await studio();
   await request("/program?format=portrait", { ...state.portrait_program, background: "#553322" }, "PUT");
   await page.getByLabel("Nombre de la escena").fill("Vertical QA");
   await page.getByRole("button", { name: "Guardar escena actual" }).click();
-  await page.getByRole("button", { name: "Vertical QA", exact: true }).click();
+  await page.getByRole("list", { name: "Escenas guardadas" }).getByText("Vertical QA", { exact: true }).waitFor();
   await page.locator(".stage.format-portrait").waitFor();
   await page.screenshot({ path: join(work, "vertical-preview.png") });
   await page.getByRole("button", { name: /Configuración/ }).first().click();
@@ -81,7 +81,9 @@ try {
   await page.getByRole("button", { name: "Guardar destino", exact: true }).click();
   await page.getByRole("button", { name: "Añadir destino", exact: true }).waitFor();
   await page.getByRole("button", { name: /Estudio en vivo/ }).click();
-  const started = await request("/broadcast/start", {});
+  // Mide cada programa: la pantalla de inicio es común a los dos formatos.
+  await request("/slates/start", { title: "Inicio", show_on_go_live: false }, "PUT");
+  const started = await request("/broadcast/start?record=true", {});
   const waitState = async (name, expected, timeout = 30000) => {
     for (const end = Date.now() + timeout; Date.now() < end;) {
       const s = await studio();
@@ -104,7 +106,7 @@ try {
   state = await waitState("Vertical QA", "live");
   assert(state.broadcast.id === started.id && state.destinations.find((d) => d.name === "Horizontal QA").status === "live", "recovery interrupted other outputs");
   await sleep(4000);
-  await request("/broadcast/stop", {});
+  await request("/broadcast/stop?all=true", {});
   for (let i = 0; i < 100; i++) { if (["complete", "error"].includes((await studio()).broadcast.status)) break; await sleep(200); }
   assert((await studio()).broadcast.status === "complete", "broadcast did not finish cleanly");
   await sleep(1000);

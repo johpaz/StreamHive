@@ -15,18 +15,22 @@ pub(super) struct Relay {
     pub url: String,
     pub state: Arc<Mutex<String>>,
     pub retry: watch::Sender<u64>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Detener el directo descarta el publicador; `kill_on_drop` cierra su FFmpeg.
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl Relay {
     pub fn spawn(bin: String, url: String, mut input: broadcast::Receiver<Arc<[u8]>>) -> Self {
         let state = Arc::new(Mutex::new("CONNECTING".to_string()));
         let (retry, mut retried) = watch::channel(0u64);
-        let result = Self {
-            url: url.clone(),
-            state: state.clone(),
-            retry,
-        };
-        tokio::spawn(async move {
+        let (published, shared) = (url.clone(), state.clone());
+        let task = tokio::spawn(async move {
             let set = |s: &str| *state.lock().unwrap() = s.into();
             let mut first = true;
             loop {
@@ -125,6 +129,11 @@ impl Relay {
                 let _ = child.kill().await;
             }
         });
-        result
+        Self {
+            url: published,
+            state: shared,
+            retry,
+            task,
+        }
     }
 }

@@ -66,7 +66,7 @@ try {
   const d = await post("/api/v1/destination", { url: `rtmp://127.0.0.1:${rtmpPort}/live`, key: "key" }, "PUT");
   assert(d.ok(), "destino: " + (await d.text()));
   await sleep(500);
-  const start = await post("/api/v1/broadcast/start", {});
+  const start = await post("/api/v1/broadcast/start?record=true", {});
   assert(start.ok(), "start: " + (await start.text()));
   // Lo que hará el shell Tauri: preguntar por la ventana del compositor y abrirla.
   let path;
@@ -84,7 +84,7 @@ try {
   await sleep(Number(process.env.E2E_SECONDS || 15) * 1000);
   const status = await (await page.request.get(`${origin}/api/v1/studio`)).json();
   console.log("estado de la emisión:", status.broadcast?.status, status.broadcast?.error || "");
-  const stop = await post("/api/v1/broadcast/stop", {});
+  const stop = await post("/api/v1/broadcast/stop?all=true", {});
   assert(stop.ok(), "stop: " + (await stop.text()));
   const mp4 = join(rec, `${status.broadcast.id}.mp4`);
   for (let i = 0; i < 80 && !(await (await page.request.get(`${origin}/api/v1/studio`)).json()).broadcast?.status.match(/complete|error/); i++) await sleep(250);

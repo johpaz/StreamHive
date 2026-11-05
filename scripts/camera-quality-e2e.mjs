@@ -32,7 +32,7 @@ try {
   await page.getByRole("button", { name: "Añadir Anfitrión", exact: true }).click();
   const post = (path, data, method = "POST") => page.request.fetch(`${origin}${path}`, { method, headers: { Origin: origin }, data });
   assert((await post("/api/v1/destinations", { platform: "custom", name: "local", url: "rtmp://127.0.0.1:19371/live", key: "k" })).ok(), "destino");
-  assert((await post("/api/v1/broadcast/start", {})).ok(), "start");
+  assert((await post("/api/v1/broadcast/start?record=true", {})).ok(), "start");
   let renderer;
   for (let i = 0; i < 60 && !renderer; i++) { renderer = app.windows().find((w) => w.url().includes("/render?")); if (!renderer) await sleep(250); }
   assert(renderer, "sin compositor");
@@ -63,7 +63,7 @@ try {
     marks.push([label, (Date.now() - t0) / 1000 - 2]);
     rows.push(row); console.log(JSON.stringify(row));
   }
-  assert((await post("/api/v1/broadcast/stop", {})).ok(), "stop");
+  assert((await post("/api/v1/broadcast/stop?all=true", {})).ok(), "stop");
   const studio = await (await page.request.get(`${origin}/api/v1/studio`)).json();
   for (let i = 0; i < 100; i++) { const b = (await (await page.request.get(`${origin}/api/v1/studio`)).json()).broadcast; if (/complete|error/.test(b?.status)) break; await sleep(250); }
   const mp4 = join(work, "rec", `${studio.broadcast.id}.mp4`);

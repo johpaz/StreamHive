@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 type DesktopBridge = {
   openRenderer: (path: string) => Promise<void>;
   closeRenderer: () => Promise<void>;
+  chooseFolder?: (current: string) => Promise<string | null>;
+  openFolder?: (folder: string) => Promise<string | void>;
 };
 // Lo expone el preload de Electron (desktop/electron/preload.js).
 export const desktopBridge = (): DesktopBridge | undefined =>
