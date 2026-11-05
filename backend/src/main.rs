@@ -1,4 +1,6 @@
 mod assets;
+mod chat;
+mod chat_store;
 mod livekit;
 mod model;
 mod monitor;
@@ -37,6 +39,7 @@ struct App {
     data: Arc<Mutex<Data>>,
     store: Arc<StdMutex<store::Store>>,
     events: broadcast::Sender<()>,
+    chat_bus: chat_store::Bus,
     operations: Arc<Mutex<()>>,
     lk: livekit::LiveKit,
     engine: output::Engine,
@@ -1552,9 +1555,16 @@ async fn events(State(s): State<App>, mut req: Request) -> Result<Response, Erro
         )
         .await;
         let mut rx = s.events.subscribe();
+        let mut chat_rx = s.chat_bus.0.subscribe();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
         loop {
-            tokio::select! {event=rx.recv()=>{if event.is_err()&&!matches!(event,Err(broadcast::error::RecvError::Lagged(_))){break}if s.participant(&h).await.is_err(){let _=ws.send(Message::Close(None)).await;break}if ws.send(Message::Text("refresh".into())).await.is_err(){break}},_=tick.tick()=>{if s.participant(&h).await.is_err(){break}if ws.send(Message::Ping(vec![].into())).await.is_err(){break}},message=ws.next()=>{if matches!(message,None|Some(Err(_))|Some(Ok(Message::Close(_)))){break}}}
+            tokio::select! {event=chat_rx.recv()=>{
+                if s.participant(&h).await.is_err(){break}
+                if chat::identity(&s,&h).await.is_ok() {
+                    let event=event.unwrap_or_else(|_|json!({"type":"chat.sync"}));
+                    if ws.send(Message::Text(event.to_string().into())).await.is_err(){break}
+                }
+            },event=rx.recv()=>{if event.is_err()&&!matches!(event,Err(broadcast::error::RecvError::Lagged(_))){break}if s.participant(&h).await.is_err(){let _=ws.send(Message::Close(None)).await;break}if ws.send(Message::Text("refresh".into())).await.is_err(){break}},_=tick.tick()=>{if s.participant(&h).await.is_err(){break}if ws.send(Message::Ping(vec![].into())).await.is_err(){break}},message=ws.next()=>{if matches!(message,None|Some(Err(_))|Some(Ok(Message::Close(_)))){break}}}
         }
     });
     Ok((
@@ -1956,6 +1966,9 @@ fn router(s: App) -> Router {
         .route("/api/v1/studio", get(studio))
         .route("/api/v1/status", get(status))
         .route("/api/v1/events", get(events))
+        .route("/api/v1/chat/messages", get(chat::history).post(chat::send))
+        .route("/api/v1/chat/messages/{id}", delete(chat::delete))
+        .route("/api/v1/chat/conversation", post(chat::rotate))
         .route("/api/v1/invitations", post(invite).get(invitations))
         .route("/api/v1/invitations/{id}", delete(revoke))
         .route("/api/v1/join", post(join))
@@ -2120,6 +2133,7 @@ async fn main() -> anyhow::Result<()> {
         max_guests: env("MAX_GUESTS", "10").parse().unwrap_or(10),
         desktop_renderer: Default::default(),
         remote: Default::default(),
+        chat_bus: Default::default(),
         engine: match env("ENGINE", "egress").as_str() {
             "ffmpeg" => output::Engine::Ffmpeg(output::Ffmpeg::new(
                 env("FFMPEG_BIN", "ffmpeg"),
@@ -2154,6 +2168,7 @@ async fn main() -> anyhow::Result<()> {
         login_attempts: Arc::new(Mutex::new((now(), 0))),
     };
     remote::start(s.clone());
+    chat::start_pruner(s.clone());
     let worker = s.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -2242,6 +2257,7 @@ mod api_tests {
             engine: output::Engine::Egress(test_lk()),
             desktop_renderer: Default::default(),
             remote: Default::default(),
+            chat_bus: Default::default(),
             monitor: Default::default(),
             max_guests: 5,
             ca_pem: None,
@@ -3755,6 +3771,7 @@ mod api_tests {
             stored
         );
         remote::start(s.clone());
+        chat::start_pruner(s.clone());
         for _ in 0..40 {
             if call(&s, "GET", "/api/v1/remote-server", admin, Value::Null)
                 .await
@@ -3900,6 +3917,84 @@ mod api_tests {
                 .is_none()
         );
         task.abort();
+    }
+    #[tokio::test]
+    async fn chat_admission_rotation_and_stale_sends() {
+        let s = app();
+        waiting(&s, "guest").await;
+        let admin = Some(("host", "admin"));
+        let guest = Some(("guest", "guest"));
+        assert_eq!(
+            call(&s, "GET", "/api/v1/chat/messages", guest, Value::Null)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        s.data
+            .lock()
+            .await
+            .participants
+            .get_mut("guest")
+            .unwrap()
+            .status = "admitted".into();
+        let page = call(&s, "GET", "/api/v1/chat/messages", guest, Value::Null)
+            .await
+            .2;
+        let sid = page["conversation_id"].as_str().unwrap();
+        let b = json!({"session_id":sid,"client_message_id":uuid::Uuid::new_v4().to_string(),"text":"Hola"});
+        assert_eq!(
+            call(&s, "POST", "/api/v1/chat/messages", guest, b.clone())
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                &s,
+                "POST",
+                "/api/v1/chat/conversation",
+                guest,
+                json!({"session_id":sid})
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &s,
+                "POST",
+                "/api/v1/chat/conversation",
+                admin,
+                json!({"session_id":sid})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&s, "POST", "/api/v1/chat/messages", guest, b).await.0,
+            StatusCode::GONE
+        );
+        assert_eq!(
+            call(&s, "GET", "/api/v1/chat/messages", guest, Value::Null)
+                .await
+                .2["messages"],
+            json!([])
+        );
+        s.data
+            .lock()
+            .await
+            .participants
+            .get_mut("guest")
+            .unwrap()
+            .status = "removed".into();
+        assert_eq!(
+            call(&s, "GET", "/api/v1/chat/messages", guest, Value::Null)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
     }
 }
 

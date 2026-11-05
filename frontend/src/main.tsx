@@ -1,3 +1,5 @@
+import { StudioChat } from "./StudioChat";
+import { chatSignal } from "./chat";
 import React, { useEffect, useState } from "react";
 import { DesktopRenderer } from "./desktop";
 import { audioMode, loadAudioMode } from "./audio-quality";
@@ -84,7 +86,11 @@ function App() {
       socket = new WebSocket(
         `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/v1/events`,
       );
-      socket.onmessage = () => void refresh();
+      socket.onopen = () => chatSignal();
+      socket.onmessage = (event) => {
+        if (event.data === "refresh") void refresh();
+        else chatSignal(event.data);
+      };
       socket.onclose = () => {
         if (!stopped) reconnect = setTimeout(open, 3000);
       };
@@ -198,6 +204,7 @@ function App() {
   );
   return (
     <div className="app-shell">
+      {admitted && <StudioChat key={me.id} me={me} />}
       <DesktopRenderer key={broadcast?.id} active={admin && running} />
       <aside className="sidebar">
         <a className="brand" href="/" aria-label="StreamHive · Inicio">

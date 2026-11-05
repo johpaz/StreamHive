@@ -1,3 +1,5 @@
+import { StudioChat } from "./StudioChat";
+import { chatSignal } from "./chat";
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 type Snapshot = {session:{id:string;host_online:boolean;closed:boolean;expires:number};participant:{id:string;name:string;status:string}|null};
@@ -11,8 +13,8 @@ function Guest() {
     let stopped=false;let socket:WebSocket|undefined;let timer:ReturnType<typeof setTimeout>;
     const open=()=>{
       socket=new WebSocket(`${location.protocol==="https:"?"wss":"ws"}://${location.host}/api/v1/events?session_id=${encodeURIComponent(session)}`);
-      socket.onopen=()=>{setConnected(true);setError("");};
-      socket.onmessage=(e)=>{const m=JSON.parse(e.data);if(m.type==="snapshot"){setState(m.data);if(m.data.session.closed||m.data.session.expires*1000<=Date.now()||["removed","rejected"].includes(m.data.participant?.status)){stopped=true;socket?.close();}}};
+      socket.onopen=()=>{setConnected(true);setError("");chatSignal();};
+      socket.onmessage=(e)=>{chatSignal(e.data);const m=JSON.parse(e.data);if(m.type==="snapshot"){setState(m.data);if(m.data.session.closed||m.data.session.expires*1000<=Date.now()||["removed","rejected"].includes(m.data.participant?.status)){stopped=true;socket?.close();}}};
       socket.onclose=()=>{setConnected(false);if(!stopped)timer=setTimeout(open,3000);};
     };open();return()=>{stopped=true;clearTimeout(timer);socket?.close();};
   },[session]);
@@ -28,6 +30,7 @@ function Guest() {
       {state?.participant&&<p>{state.participant.name}</p>}
       {!closed&&!["removed","rejected"].includes(status??"")&&<p>{!connected?"Reconectando con el servidor…":state?.session.host_online?"El anfitrión está conectado.":"El anfitrión no está conectado. Tu solicitud se conserva."}</p>}
     </>}
+    {!closed&&status==="admitted"&&state?.participant&&<StudioChat key={session+state.participant.id} me={{id:state.participant.id,role:"guest"}} sessionId={session}/>}
     {error&&<p className="error" role="alert">{error}</p>}
     <p className="notice">Esta página gestiona tu entrada. La conexión de cámara y audio todavía no está incluida en esta versión.</p>
   </main>;

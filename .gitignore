@@ -22,3 +22,5 @@ StreamingHive.txt
 
 /sessions/web/guest.js
 /deploy/sessions/.env
+
+/sessions/web/chat.css

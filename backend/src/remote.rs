@@ -103,6 +103,8 @@ async fn request(
             StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
             if r.status().as_u16() == 401 {
                 "La instalación no está autorizada. Vuelve a guardar la URL para vincularla.".into()
+            } else if r.status().as_u16() == 429 {
+                "Espera unos segundos antes de enviar otro mensaje".into()
             } else {
                 "El servidor no pudo completar la operación".into()
             },
@@ -114,7 +116,12 @@ async fn request(
         .await
         .map_err(|_| bad("Respuesta incompleta del servidor"))?
     {
-        if bytes.len() + chunk.len() > 512000 {
+        let limit = if path.starts_with("/chat/") {
+            2_000_000
+        } else {
+            512000
+        };
+        if bytes.len() + chunk.len() > limit {
             return Err(bad("Respuesta demasiado grande"));
         }
         bytes.extend_from_slice(&chunk);
@@ -393,6 +400,12 @@ pub fn start(s: App) {
                                 Some(Ok(Message::Text(text))) => {
                                     let data: Value = serde_json::from_str(&text)
                                         .map_err(|_| bad("Mensaje del servidor inválido"))?;
+                                    if data["type"]
+                                        .as_str()
+                                        .is_some_and(|t| t.starts_with("chat."))
+                                    {
+                                        let _ = s.chat_bus.0.send(data.clone());
+                                    }
                                     if data["type"] == "snapshot" {
                                         let snapshot = data["data"].clone();
                                         let closed = snapshot["session"]["closed"] == true;
@@ -449,4 +462,39 @@ pub fn start(s: App) {
             }
         }
     });
+}
+
+// A configured remote session remains selected during outages: never fall back
+// to a different local conversation when its control connection is unavailable.
+pub fn chat_selected(s: &App) -> bool {
+    s.remote.state.lock().unwrap()["snapshot"]["session"]["id"].is_string()
+}
+pub async fn chat_request(
+    s: &App,
+    method: reqwest::Method,
+    p: &crate::chat_store::Page,
+    id: Option<&str>,
+    body: Option<Value>,
+) -> Result<Value, Error> {
+    let c = configured(s).await?;
+    let sid = current_id(s)?;
+    if p.session_id.as_ref().is_some_and(|v| v != &sid)
+        || body
+            .as_ref()
+            .and_then(|b| b["session_id"].as_str())
+            .is_some_and(|v| v != sid)
+    {
+        return Err(Error(StatusCode::GONE, "La conversación cambió".into()));
+    }
+    let mut path = format!(
+        "/chat/messages{}?session_id={sid}",
+        id.map(|v| format!("/{v}")).unwrap_or_default()
+    );
+    if let Some(n) = p.after {
+        path.push_str(&format!("&after={n}"));
+    }
+    if let Some(n) = p.before {
+        path.push_str(&format!("&before={n}"));
+    }
+    request(&c.url, Some(credential(s, &c)?), method, &path, body).await
 }

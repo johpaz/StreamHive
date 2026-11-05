@@ -214,3 +214,7 @@ El logotipo y los fondos de escenario se generaron con IA (Codex): su origen y l
 La app permite configurar **solo la URL** de un servicio `streamhive-sessions` desplegado por el usuario. Ofrece invitaciones HTTPS, sala de espera y admisión con credenciales automáticas por instalación. Es independiente del transporte de audio/vídeo; esta versión del servicio no añade cámaras remotas ni guarda grabaciones.
 
 Consulta [el despliegue con Traefik o Caddy](deploy/sessions/README.md), [la especificación de API](sessions/openapi.json) y [las mediciones y pruebas](docs/session-service-validation.md). La variante Traefik utiliza por defecto la red externa `n8n_evoapi` y el resolver `mytlschallenge`. Incluye construcción local de imagen y workflow de publicación en Docker Hub; no requiere instalar otra base de datos ni un proxy adicional cuando ya existe Traefik.
+
+### Chat del estudio
+
+El anfitrión y los invitados admitidos disponen de un chat flotante con una abejita animada: burbuja con no leídos, ventana mediana y vista completa. Conserva el historial al reconectar y permite al anfitrión borrar mensajes. Funciona en modo local y en el portal de sesiones remotas; consulta [uso, arquitectura y validación](docs/chat-general.md). Prueba aislada de navegador: `bun run test:chat`.

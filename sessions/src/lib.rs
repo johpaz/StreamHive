@@ -1,3 +1,6 @@
+mod chat;
+#[path = "../../backend/src/chat_store.rs"]
+mod chat_store;
 use axum::{
     Json, Router,
     body::Body,
@@ -118,6 +121,7 @@ pub struct App {
     db: Arc<Mutex<Connection>>,
     pub config: Config,
     rooms: Arc<Mutex<HashMap<String, broadcast::Sender<()>>>>,
+    chat_bus: chat_store::Bus,
     hosts: Arc<Mutex<HashMap<String, usize>>>,
     limits: Arc<Mutex<HashMap<String, (i64, u32)>>>,
     pub connections: Arc<AtomicUsize>,
@@ -131,7 +135,7 @@ impl App {
         let c = Connection::open(&config.database)?;
         let schema_version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            schema_version <= 1,
+            schema_version <= 2,
             "Database schema is newer than this service; refusing downgrade"
         );
         c.busy_timeout(Duration::from_secs(5))?;
@@ -142,12 +146,16 @@ impl App {
           CREATE TABLE IF NOT EXISTS invitations(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS participants(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, invitation_id TEXT NOT NULL REFERENCES invitations(id) ON DELETE CASCADE, name TEXT NOT NULL, status TEXT NOT NULL, credential_hash TEXT NOT NULL UNIQUE, created INTEGER NOT NULL);
           CREATE INDEX IF NOT EXISTS participants_session ON participants(session_id);
-          PRAGMA user_version=1;")?;
+          ")?;
+        chat_store::init(&c)?;
+        c.pragma_update(None, "user_version", 2)?;
+        chat_store::prune(&c, now())?;
         let (shutdown, _) = watch::channel(false);
         Ok(Self {
             db: Arc::new(Mutex::new(c)),
             config,
             rooms: Default::default(),
+            chat_bus: Default::default(),
             hosts: Default::default(),
             limits: Default::default(),
             connections: Arc::new(AtomicUsize::new(0)),
@@ -190,6 +198,8 @@ impl App {
     }
     pub async fn prune(&self) -> Result<()> {
         self.db(|c| {
+            c.execute("UPDATE chat_conversations SET closed_at=(SELECT expires FROM sessions WHERE sessions.id=chat_conversations.id) WHERE closed_at IS NULL AND id IN (SELECT id FROM sessions WHERE expires<=?1)",[now()])?;
+            chat_store::prune(c, now())?;
             c.execute(
                 "DELETE FROM sessions WHERE expires < ?1",
                 [now() - 7 * 86400],
@@ -419,7 +429,7 @@ async fn close_session(
     let key = sid.clone();
     s.db(move |c| { // Closing twice is safe, including after a lost response.
         let count=c.execute("UPDATE sessions SET closed=1,revision=revision+CASE WHEN closed=0 THEN 1 ELSE 0 END WHERE id=?1 AND installation_id=?2",params![key,oid])?;
-        if count==0 {return Err(missing());} Ok(())
+        if count==0 {return Err(missing());} chat_store::close(c,&key,now())?; Ok(())
     }).await?;
     s.notify(&sid);
     Ok(Json(json!({"ok":true})))
@@ -645,6 +655,7 @@ async fn events(
     }
     let upgrade = hyper::upgrade::on(&mut req);
     let mut rx = s.channel(&sid).subscribe();
+    let mut chat_rx = s.chat_bus.0.subscribe();
     let mut stop = s.shutdown.subscribe();
     tokio::spawn(async move {
         let run = async {
@@ -705,6 +716,12 @@ async fn events(
                 while !changed {
                     tokio::select! {
                         _=stop.changed()=>{let _=tokio::time::timeout(Duration::from_secs(2),ws.close(None)).await;changed=true;},
+                        event=chat_rx.recv()=>{
+                            let value=event.unwrap_or_else(|_|json!({"type":"chat.sync","conversation_id":sid}));
+                            if value["conversation_id"]==sid && chat::authorized(&s,&h,&sid).await.is_ok() {
+                                if !matches!(tokio::time::timeout(Duration::from_secs(5),ws.send(Message::Text(value.to_string().into()))).await,Ok(Ok(()))){changed=true;}
+                            }
+                        },
                         e=rx.recv()=>{if matches!(e,Err(broadcast::error::RecvError::Closed)){let _=tokio::time::timeout(Duration::from_secs(2),ws.close(None)).await;}changed=true;},
                         msg=ws.next()=>match msg {Some(Ok(Message::Pong(_)|Message::Ping(_)))=>seen=tokio::time::Instant::now(),Some(Ok(Message::Text(_)))=>seen=tokio::time::Instant::now(),_=>{changed=true;let _=tokio::time::timeout(Duration::from_secs(2),ws.close(None)).await;}},
                         _=heartbeat.tick()=>{if seen.elapsed()>Duration::from_secs(90)||!matches!(tokio::time::timeout(Duration::from_secs(5),ws.send(Message::Ping(Vec::new().into()))).await,Ok(Ok(()))){let _=tokio::time::timeout(Duration::from_secs(2),ws.close(None)).await;changed=true;}else{changed=true;}}
@@ -768,6 +785,8 @@ pub fn router(s: App) -> Router {
         .route("/api/v1/join/{token}", post(join).get(resume))
         .route("/api/v1/guest", get(guest_state))
         .route("/api/v1/events", get(events))
+        .route("/api/v1/chat/messages", get(chat::history).post(chat::send))
+        .route("/api/v1/chat/messages/{id}", delete(chat::delete))
         .route(
             "/",
             get(|| async { Html(include_str!("../web/index.html")) }),
@@ -782,6 +801,15 @@ pub fn router(s: App) -> Router {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../web/guest.js"),
+                )
+            }),
+        )
+        .route(
+            "/chat.css",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                    include_str!("../web/chat.css"),
                 )
             }),
         )

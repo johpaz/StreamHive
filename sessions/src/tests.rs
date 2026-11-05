@@ -446,10 +446,158 @@ async fn origin_limits_and_api_fallback_are_enforced() {
 async fn a_newer_database_is_never_silently_downgraded() {
     let s = app();
     s.db(|c| {
-        c.execute_batch("PRAGMA user_version=2")?;
+        c.execute_batch("PRAGMA user_version=3")?;
         Ok(())
     })
     .await
     .unwrap();
     assert!(App::open(s.config.clone()).is_err());
+}
+
+#[tokio::test]
+async fn chat_requires_admission_is_scoped_and_recovers_moderation() {
+    let s = app();
+    let owner = install(&s).await;
+    let sid = room(&s, &owner).await;
+    let i = invite(&s, &owner, &sid).await;
+    let (cookie, g) = join_guest(&s, &i, "Ana 🐝").await;
+    let pid = g["participant_id"].as_str().unwrap();
+    let path = format!("/api/v1/chat/messages?session_id={sid}");
+    assert_eq!(
+        call(&s, "GET", &path, None, Some(&cookie), Value::Null)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let payload = json!({"session_id":sid,"client_message_id":id(),"text":"Hola 🐝"});
+    assert_eq!(
+        call(
+            &s,
+            "POST",
+            "/api/v1/chat/messages",
+            None,
+            Some(&cookie),
+            payload.clone()
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    call(
+        &s,
+        "POST",
+        &format!("/api/v1/sessions/{sid}/participants/{pid}"),
+        Some(&owner),
+        None,
+        json!({"action":"admit"}),
+    )
+    .await;
+    let sent = call(
+        &s,
+        "POST",
+        "/api/v1/chat/messages",
+        None,
+        Some(&cookie),
+        payload.clone(),
+    )
+    .await;
+    assert_eq!(sent.0, StatusCode::OK);
+    assert_eq!(sent.2["sender_name"], "Ana 🐝");
+    assert_eq!(
+        call(
+            &s,
+            "POST",
+            "/api/v1/chat/messages",
+            None,
+            Some(&cookie),
+            payload
+        )
+        .await
+        .2["id"],
+        sent.2["id"]
+    );
+    let restored = App::open(s.config.clone()).unwrap();
+    let page = call(&restored, "GET", &path, Some(&owner), None, Value::Null)
+        .await
+        .2;
+    assert_eq!(page["messages"].as_array().unwrap().len(), 1);
+    let delete = format!(
+        "/api/v1/chat/messages/{}?session_id={sid}",
+        sent.2["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        call(&s, "DELETE", &delete, None, Some(&cookie), Value::Null)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&s, "DELETE", &delete, Some(&owner), None, Value::Null)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let recovery = call(
+        &s,
+        "GET",
+        &format!("{path}&after={}", page["cursor"]),
+        None,
+        Some(&cookie),
+        Value::Null,
+    )
+    .await
+    .2;
+    assert_eq!(recovery["events"][0]["message"]["deleted"], true);
+    let other = install(&s).await;
+    let other_sid = room(&s, &other).await;
+    assert_ne!(other_sid, sid);
+    assert_eq!(
+        call(&s, "GET", &path, Some(&other), None, Value::Null)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &s,
+            "GET",
+            &format!("/api/v1/chat/messages?session_id={other_sid}"),
+            None,
+            Some(&cookie),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    call(
+        &s,
+        "POST",
+        &format!("/api/v1/sessions/{sid}/participants/{pid}"),
+        Some(&owner),
+        None,
+        json!({"action":"remove"}),
+    )
+    .await;
+    assert_eq!(
+        call(&s, "GET", &path, None, Some(&cookie), Value::Null)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    call(
+        &s,
+        "POST",
+        &format!("/api/v1/sessions/{sid}/close"),
+        Some(&owner),
+        None,
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        call(&s, "GET", &path, Some(&owner), None, Value::Null)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
 }

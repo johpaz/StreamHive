@@ -2,7 +2,7 @@ FROM docker.io/oven/bun:1.4.3 AS guest
 WORKDIR /app
 COPY frontend/package.json frontend/bun.lock ./frontend/
 RUN cd frontend && bun install --frozen-lockfile
-COPY frontend/src/SessionGuest.tsx frontend/src/SessionGuest.tsx
+COPY frontend/src frontend/src
 RUN bun build frontend/src/SessionGuest.tsx --target browser --minify --define 'process.env.NODE_ENV="production"' --outfile /guest.js
 
 FROM docker.io/library/rust:1.96-bookworm AS build
@@ -11,6 +11,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY backend backend
 COPY sessions sessions
 COPY --from=guest /guest.js sessions/web/guest.js
+COPY --from=guest /guest.css sessions/web/chat.css
 RUN cargo build --release --locked -p streamhive-sessions
 
 FROM docker.io/library/debian:bookworm-slim

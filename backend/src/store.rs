@@ -1,7 +1,7 @@
 use crate::model::Data;
 use rusqlite::{Connection, params};
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
     /// Último JSON escrito: evita fsync cuando una mutación no cambia nada.
     last: std::cell::RefCell<Option<String>>,
 }
@@ -9,6 +9,8 @@ impl Store {
     pub fn open(path: &str) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
+        crate::chat_store::init(&conn)?;
+        crate::chat_store::prune(&conn, crate::now() as i64)?;
         Ok(Self {
             conn,
             last: Default::default(),

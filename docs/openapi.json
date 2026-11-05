@@ -316,7 +316,8 @@
           "401": {
             "description": "Unauthenticated"
           }
-        }
+        },
+        "description": "Existing refresh/snapshot protocol plus chat.message, chat.deleted and chat.closed notifications with conversation_id; chat.sync requests resynchronization after lag. Notifications contain no message text. Fetch /api/v1/chat/messages using the last confirmed event cursor. Check admission for every delivery; reconnect and poll as a fallback."
       }
     },
     "/api/v1/invitations": {
@@ -1828,6 +1829,213 @@
           }
         }
       ]
+    },
+    "/api/v1/chat/messages": {
+      "get": {
+        "summary": "Admitted participants: paginated chat history or incremental changes",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active conversation; local GET may omit to discover the current conversation"
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Event cursor; up to 100 changes per page, including deletions"
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Older message cursor; up to 50 messages. Cannot combine with after."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid text, identifier or cursor"
+          },
+          "401": {
+            "description": "Authentication or current admission required"
+          },
+          "404": {
+            "description": "Session absent or belongs to another owner"
+          },
+          "410": {
+            "description": "Conversation closed or changed"
+          },
+          "429": {
+            "description": "30 messages/minute, at most 5 in any 10 seconds per participant"
+          }
+        }
+      },
+      "post": {
+        "summary": "Admitted participants: send an idempotent plain-text message",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatSend"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatMessage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid text, identifier or cursor"
+          },
+          "401": {
+            "description": "Authentication or current admission required"
+          },
+          "404": {
+            "description": "Session absent or belongs to another owner"
+          },
+          "410": {
+            "description": "Conversation closed or changed"
+          },
+          "429": {
+            "description": "30 messages/minute, at most 5 in any 10 seconds per participant"
+          }
+        }
+      }
+    },
+    "/api/v1/chat/messages/{id}": {
+      "delete": {
+        "summary": "Host: delete a message and synchronize a tombstone",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active conversation; local GET may omit to discover the current conversation"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatMessage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid text, identifier or cursor"
+          },
+          "401": {
+            "description": "Authentication or current admission required"
+          },
+          "404": {
+            "description": "Session absent or belongs to another owner"
+          },
+          "410": {
+            "description": "Conversation closed or changed"
+          },
+          "429": {
+            "description": "30 messages/minute, at most 5 in any 10 seconds per participant"
+          }
+        }
+      }
+    },
+    "/api/v1/chat/conversation": {
+      "post": {
+        "summary": "Host: close current local conversation and start an empty one",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "session_id"
+                ],
+                "properties": {
+                  "session_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Previous and new conversation identifiers"
+          },
+          "400": {
+            "description": "Remote conversation closes with its session"
+          },
+          "410": {
+            "description": "Stale conversation"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2229,6 +2437,137 @@
           "portrait"
         ],
         "default": "landscape"
+      },
+      "ChatMessage": {
+        "type": "object",
+        "required": [
+          "id",
+          "conversation_id",
+          "sender_id",
+          "sender_name",
+          "sender_role",
+          "text",
+          "created_at",
+          "deleted",
+          "client_message_id",
+          "sequence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "conversation_id": {
+            "type": "string"
+          },
+          "sender_id": {
+            "type": "string"
+          },
+          "sender_name": {
+            "type": "string"
+          },
+          "sender_role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "guest"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Server Unix seconds"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "client_message_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sequence": {
+            "type": "integer"
+          }
+        }
+      },
+      "ChatSend": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "client_message_id",
+          "text"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "client_message_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Plain text; also capped at 8 KiB UTF-8"
+          }
+        }
+      },
+      "ChatPage": {
+        "type": "object",
+        "properties": {
+          "conversation_id": {
+            "type": "string"
+          },
+          "viewer_id": {
+            "type": "string"
+          },
+          "can_reset": {
+            "type": "boolean",
+            "default": false
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatMessage"
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "enum": [
+                    "chat.message",
+                    "chat.deleted"
+                  ]
+                },
+                "sequence": {
+                  "type": "integer"
+                },
+                "message": {
+                  "$ref": "#/components/schemas/ChatMessage"
+                }
+              }
+            }
+          },
+          "cursor": {
+            "type": "integer"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
       }
     }
   }
