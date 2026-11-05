@@ -1,0 +1,14 @@
+{
+  "name": "streamhive",
+  "private": true,
+  "scripts": {
+    "dev": "bun scripts/dev.mjs",
+    "check": "bash scripts/check.sh",
+    "media:install": "bun scripts/install-livekit.mjs",
+    "test:browser": "bun run dev --smoke"
+  },
+  "devDependencies": {
+    "playwright": "1.64.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,50 @@
+// Real HTTP/WSS control flow; no camera, LiveKit, encoder or external account required.
+import { chromium } from "playwright";
+import { spawn, execFileSync } from "node:child_process";
+import { createServer } from "node:net";
+import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { randomBytes } from "node:crypto";
+const root=resolve(import.meta.dirname,"..");const work=mkdtempSync(join(tmpdir(),"sh-sessions-e2e-"));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));const assert=(v,m)=>{if(!v)throw Error(m);};
+const free=()=>new Promise(r=>{const s=createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>r(p));});});
+const children=[];let browser;let success=false;
+const start=(file,env)=>{const p=spawn(file,[],{env:{...process.env,...env},stdio:["ignore","pipe","pipe"]});let log="";p.stdout.on("data",d=>log=(log+d).slice(-3000));p.stderr.on("data",d=>log=(log+d).slice(-3000));p.log=()=>log;children.push(p);return p;};
+const stop=async p=>{if(p.exitCode!==null)return;p.kill("SIGTERM");for(let i=0;i<50&&p.exitCode===null;i++)await sleep(100);if(p.exitCode===null)p.kill("SIGKILL");};
+const ready=async origin=>{for(let i=0;i<100;i++){try{if((await fetch(`${origin}/healthz`)).ok)return;}catch{}await sleep(100);}throw Error("Service failed to start");};
+try {
+ const [cloudPort,appPort]=await Promise.all([free(),free()]);const cloud=`http://localhost:${cloudPort}`,app=`http://localhost:${appPort}`;
+ const cloudEnv={PUBLIC_URL:cloud,LISTEN_ADDR:`127.0.0.1:${cloudPort}`,DATA_DIR:join(work,"cloud")};
+ const pass=randomBytes(20).toString("hex");const appEnv={ENGINE:"ffmpeg",DATA_DIR:join(work,"desktop"),RECORDINGS_DIR:join(work,"recordings"),STATIC_DIR:join(root,"frontend/dist"),LISTEN_ADDR:`127.0.0.1:${appPort}`,PUBLIC_ORIGIN:app,RENDERER_URL:`${app}/render`,ADMIN_PASSWORD:pass,SESSION_SECRET:randomBytes(32).toString("hex"),MASTER_KEY:randomBytes(32).toString("base64"),LIVEKIT_INTERNAL_URL:"http://127.0.0.1:1"};
+ let server=start(join(root,"target/debug/streamhive-sessions"),cloudEnv);let local=start(join(root,"target/debug/streamhive"),appEnv);await ready(cloud);await ready(app);
+ browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_PATH||undefined,args:["--no-sandbox"]});
+ const context=await browser.newContext({viewport:{width:1440,height:1100}});const page=await context.newPage();const errors=[];page.on("pageerror",e=>errors.push(e.message));
+ await page.goto(app);await page.getByLabel("Contraseña de administrador").fill(pass);await page.getByRole("button",{name:"Abrir mi estudio"}).click();await page.getByRole("heading",{name:"Mi estudio"}).waitFor();await page.getByRole("button",{name:/Configuración/}).first().click();
+ const panel=page.getByRole("region",{name:"Servidor de sesiones",exact:true});assert(await panel.locator("input").count()===1,"configuration must only ask for URL");
+ await panel.getByLabel("URL del servidor VPS").fill(cloud);await panel.getByRole("button",{name:"Comprobar",exact:true}).click();await panel.getByText(/Servidor compatible/).waitFor();
+ const installations=()=>Number(execFileSync("python3",["-c","import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('select count(*) from installations').fetchone()[0])",join(work,"cloud/sessions.sqlite")]).toString().trim());
+ assert(installations()===0,"Check unexpectedly registered an installation");
+ await panel.getByRole("button",{name:"Guardar y conectar",exact:true}).click();await panel.getByRole("button",{name:"Crear sesión remota",exact:true}).click();
+ const waitConnected=async()=>{for(let i=0;i<100;i++){try{const r=await page.request.get(`${app}/api/v1/remote-server`);if(r.ok()&&(await r.json()).status==="connected")return;}catch{}await sleep(200);}throw Error("Desktop did not reconnect");};await waitConnected();
+ assert(installations()===1,"expected one automatic installation");
+ const invitation=async()=>{const response=page.waitForResponse(r=>r.url()===`${app}/api/v1/remote-session/invitations`&&r.request().method()==="POST");await panel.getByRole("button",{name:"Invitar por VPS",exact:true}).click();return (await (await response).json()).url;};
+ const joinGuest=async(name)=>{const url=await invitation();const ctx=await browser.newContext();const p=await ctx.newPage();p.on("pageerror",e=>errors.push(e.message));await p.goto(url);await p.getByLabel("Tu nombre").fill(name);await p.getByRole("button",{name:"Solicitar entrada"}).click();await p.getByText("Esperando al anfitrión",{exact:true}).waitFor();return p;};
+ const one=await joinGuest("Invitado Uno");const two=await joinGuest("Invitado Dos");
+ const row=name=>panel.getByRole("list",{name:"Invitados remotos"}).locator("li").filter({hasText:name});
+ await row("Invitado Uno").getByRole("button",{name:"Admitir",exact:true}).click();await one.getByText("Entrada aprobada",{exact:true}).waitFor();
+ await row("Invitado Dos").getByRole("button",{name:"Rechazar",exact:true}).click();await two.getByText("Solicitud rechazada",{exact:true}).waitFor();
+ await one.reload();await one.getByText("Entrada aprobada",{exact:true}).waitFor();
+ await page.screenshot({path:join(work,"desktop-admission.png")});await one.screenshot({path:join(work,"guest-admitted.png")});
+ console.log("URL-only configuration, encrypted enrollment, waiting, admission and rejection OK");
+ await stop(server);server=start(join(root,"target/debug/streamhive-sessions"),cloudEnv);await ready(cloud);await waitConnected();await one.getByText("El anfitrión está conectado.",{exact:true}).waitFor({timeout:15000});assert(installations()===1,"service restart re-enrolled desktop");
+ await stop(local);local=start(join(root,"target/debug/streamhive"),appEnv);await ready(app);await waitConnected();assert(installations()===1,"desktop restart re-enrolled installation");
+ await row("Invitado Uno").getByRole("button",{name:"Retirar",exact:true}).click();await one.getByText("Tu entrada fue retirada",{exact:true}).waitFor();
+ const safe=await (await page.request.get(`${app}/api/v1/remote-server`)).text();assert(!safe.includes("sealed_credential")&&!safe.includes('"credential"'),"credential leaked to UI");
+ await panel.getByRole("button",{name:"Finalizar sesión remota",exact:true}).click();await panel.getByRole("button",{name:"Crear sesión remota",exact:true}).waitFor();
+ execFileSync(join(root,"target/debug/streamhive-sessions"),["backup",join(work,"backup.sqlite")],{env:{...process.env,...cloudEnv}});
+ assert(readdirSync(join(work,"recordings")).length===0,"control service started recording");assert(!errors.length,errors.join("\n"));
+ await panel.getByRole("button",{name:"Desconectar servidor",exact:true}).click();await panel.getByText("Sin configurar",{exact:true}).waitFor();
+ success=true;console.log("SESSION SERVICE E2E OK: two guests, server/desktop restart, removal, backup and no multimedia");
+} catch(e){console.error(e.message);for(const p of children)if(p.exitCode&&p.log())console.error(p.log());}
+finally{await browser?.close();for(const p of children)await stop(p);console.log("Artifacts:",work);process.exit(success?0:1);}

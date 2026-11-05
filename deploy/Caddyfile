@@ -1,0 +1,48 @@
+{
+ email {$ACME_EMAIL}
+ acme_ca https://acme-v02.api.letsencrypt.org/directory
+ auto_https disable_redirects
+}
+
+(security) {
+ header {
+  X-Content-Type-Options nosniff
+  Referrer-Policy no-referrer
+  -Server
+ }
+}
+
+(app) {
+ import security
+ handle /api/* {
+  reverse_proxy backend:8080
+ }
+ handle /healthz {
+  reverse_proxy backend:8080
+ }
+ handle {
+  root * /srv
+  try_files {path} /index.html
+  file_server
+ }
+}
+
+http://{$APP_DOMAIN}, http://{$LIVEKIT_DOMAIN}, http://{$TURN_DOMAIN} {
+ redir https://{host}{uri} permanent
+}
+
+https://{$APP_DOMAIN} {
+ import app
+}
+https://{$LIVEKIT_DOMAIN} {
+ import security
+ reverse_proxy host.docker.internal:7880
+}
+# This site obtains the TURN certificate using ACME HTTP-01. Actual TURN/TLS
+# handshakes on public port 443 are routed by HAProxy to LiveKit port 5349.
+https://{$TURN_DOMAIN} {
+ respond "TURN endpoint" 404
+}
+http://:8081 {
+ import app
+}

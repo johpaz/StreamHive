@@ -1,0 +1,9 @@
+services:
+  sessions-migrate:
+    build:
+      context: ../..
+      dockerfile: sessions/Dockerfile
+  sessions:
+    build:
+      context: ../..
+      dockerfile: sessions/Dockerfile

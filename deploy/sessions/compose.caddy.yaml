@@ -1,0 +1,24 @@
+services:
+  sessions:
+    networks: [backend, edge]
+  caddy:
+    image: docker.io/library/caddy:2.10.2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    mem_limit: 128m
+    cpus: 0.25
+    environment:
+      SESSIONS_DOMAIN: ${SESSIONS_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [backend, edge]
+    depends_on: [sessions]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+networks:
+  edge:
+volumes:
+  caddy-data:
+  caddy-config:

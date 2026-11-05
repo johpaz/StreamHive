@@ -1,0 +1,17 @@
+{
+  "source": "frontend/public/branding/icon-512.png",
+  "sha256": "5bb385bf436edfafde1e81ee32db1fb575ff4141b150d9c01ec71727501f8f90",
+  "files": {
+    "desktop/electron/build/icons/16x16.png": "1bcd163c34004835ca6115cf2eacf5057252ea1bf0f775e6be3bb94b3e342669",
+    "desktop/electron/build/icons/24x24.png": "af25b97647b6558cf25b61d1f91069dda1e89bea6d0810b08ac77e9fbd3348b0",
+    "desktop/electron/build/icons/32x32.png": "ccbd45a0b0fa95f9288e2b1b1c107e5d897a31d940fc4c8470982aa5a673388d",
+    "desktop/electron/build/icons/48x48.png": "822897513ba0bdecc42e0acf20ae5198bfd2b5bafd7182020dd91c45a9188f58",
+    "desktop/electron/build/icons/64x64.png": "c0e5ee2e95f9970e129e05ca6a0301048a1c7dca1227a87d38a3f9dcea2f852b",
+    "desktop/electron/build/icons/128x128.png": "98750565d3203b721293c48963f34b70502c10060f25053641d67ee26bb1efbe",
+    "desktop/electron/build/icons/256x256.png": "404140516e4db4860dd2af99e25feda5ceb9ce0ee3c5085df6f957939b331e9f",
+    "desktop/electron/build/icons/512x512.png": "ad5621ddd2a89a0f95be85962f2f7f9635ed6b173f5651ebe2d0009e9164ebc0",
+    "desktop/electron/build/icon.png": "5bb385bf436edfafde1e81ee32db1fb575ff4141b150d9c01ec71727501f8f90",
+    "desktop/electron/build/icon.ico": "9ebd0d53c766c94d745e24765ba6c2493b4c9a6062642aea0dcd7ad2cdf421aa",
+    "desktop/electron/build/icon.icns": "5b862b83ef4bbbd91557934782832685243827a5f014ba0a8278561e60da5bf2"
+  }
+}

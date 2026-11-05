@@ -1,0 +1,43 @@
+name: desktop
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, triple: x86_64-unknown-linux-gnu, target: "--linux AppImage" }
+          - { os: macos-14, triple: aarch64-apple-darwin, target: "--mac dmg", experimental: true }
+          - { os: macos-13, triple: x86_64-apple-darwin, target: "--mac dmg", experimental: true }
+          - { os: windows-2022, triple: x86_64-pc-windows-msvc, target: "--win nsis" }
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.4.3 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.triple }}" }
+      # ffmpeg: Linux y Windows descargan el build LGPL verificado (scripts/desktop-sidecars.mjs). macOS aún no tiene uno:
+      # el ffmpeg de brew es GPL y el empaquetado lo rechaza, por eso esas entradas son experimentales (no bloquean).
+      - { name: ffmpeg (Linux), if: runner.os == 'Linux', run: sudo apt-get update && sudo apt-get install -y ffmpeg }
+      - { name: ffmpeg (macOS), if: runner.os == 'macOS', run: brew install ffmpeg }
+      - { name: ffmpeg (Windows), if: runner.os == 'Windows', run: choco install ffmpeg -y }
+      - run: bun install --cwd frontend --frozen-lockfile
+      - run: bun run --cwd frontend build
+      - run: bun scripts/desktop-sidecars.mjs --triple ${{ matrix.triple }}
+      - run: npm ci || npm install
+        working-directory: desktop/electron
+      - run: bun scripts/check-desktop-icons.mjs
+      - run: npx electron-builder ${{ matrix.target }} --publish never
+        working-directory: desktop/electron
+      - uses: actions/upload-artifact@v4
+        with:
+          name: streamhive-${{ matrix.triple }}
+          path: |
+            desktop/electron/dist/*.AppImage
+            desktop/electron/dist/*.dmg
+            desktop/electron/dist/*.exe

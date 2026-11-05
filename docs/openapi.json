@@ -1,0 +1,2235 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "StreamHive API",
+    "version": "0.1.0",
+    "description": "Single-owner streaming studio. Browser mutations require an Origin header matching PUBLIC_ORIGIN. Administration uses an HttpOnly session cookie. Renderer and webhook credentials are separate."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "session": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "summary": "Process liveness",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "version"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "summary": "API contract",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/login": {
+      "post": {
+        "summary": "Sign in as administrator",
+        "responses": {
+          "200": {
+            "description": "Sets Secure (HTTPS), HttpOnly, SameSite=Strict sh_session cookie"
+          },
+          "401": {
+            "description": "Wrong password"
+          },
+          "429": {
+            "description": "Login rate limited"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "password"
+                ]
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/logout": {
+      "post": {
+        "summary": "Clear session cookie",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "summary": "Current identity",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "admin",
+                        "guest"
+                      ]
+                    },
+                    "livekit_url": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "role",
+                    "livekit_url"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/studio": {
+      "get": {
+        "summary": "Studio snapshot without credentials",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Studio"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "summary": "Admin: connectivity and available recording space",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "free_bytes": {
+                      "type": "integer"
+                    },
+                    "disk_warning": {
+                      "type": "boolean"
+                    },
+                    "livekit": {
+                      "type": "boolean"
+                    },
+                    "database": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "free_bytes",
+                    "disk_warning",
+                    "livekit",
+                    "database"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "summary": "Authenticated WebSocket: refresh notifications",
+        "responses": {
+          "101": {
+            "description": "WebSocket. Text refresh signals a new snapshot; GET /api/v1/studio. Origin is required."
+          },
+          "401": {
+            "description": "Unauthenticated"
+          }
+        }
+      }
+    },
+    "/api/v1/invitations": {
+      "post": {
+        "summary": "Admin: create a revocable 24-hour guest link",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "expires": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "url",
+                    "expires"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      },
+      "get": {
+        "summary": "Admin: list invitation metadata",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Invitation"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/invitations/{id}": {
+      "delete": {
+        "summary": "Admin: revoke future joins/admissions; does not evict admitted guests",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/join": {
+      "post": {
+        "summary": "Enter waiting room; sets guest session cookie",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 60
+                  }
+                },
+                "required": [
+                  "token",
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/token": {
+      "post": {
+        "summary": "Issue a 3-minute media join token after admission",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "token": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "token",
+                    "url"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/participants/{id}": {
+      "post": {
+        "summary": "Admin: admit, wait, remove, or mute participant",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "admit",
+                      "wait",
+                      "remove",
+                      "mute"
+                    ]
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/program": {
+      "put": {
+        "summary": "Admin: update program; current revision required",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Program"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Program"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/OutputFormat"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/destination": {
+      "put": {
+        "summary": "Admin: encrypt RTMP destination; disallowed during broadcast",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "url",
+                  "key"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/broadcast/start": {
+      "post": {
+        "summary": "Admin: idempotently start RTMP and automatic MP4",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/broadcast/stop": {
+      "post": {
+        "summary": "Admin: request graceful completion; poll until finalized",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/broadcast/retry": {
+      "post": {
+        "summary": "Admin: retry only failed outputs; optional destination ID; leaves healthy outputs and recordings intact",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "destination_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/renderer/state": {
+      "get": {
+        "summary": "Scoped compositor program and display names",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "program": {
+                      "$ref": "#/components/schemas/Program"
+                    },
+                    "names": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "assets": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Asset"
+                      }
+                    },
+                    "server_time_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "program",
+                    "names"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "security": [],
+        "parameters": [
+          {
+            "name": "render_token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/OutputFormat"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/renderer/ack": {
+      "post": {
+        "summary": "Compositor acknowledges applied revision",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "revision": {
+                    "type": "integer"
+                  },
+                  "screen_missing": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "revision",
+                  "screen_missing"
+                ]
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "renderer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/recordings": {
+      "get": {
+        "summary": "Admin: list recordings newest first",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Recording"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/recordings/{id}": {
+      "get": {
+        "summary": "Admin: download finalized MP4",
+        "responses": {
+          "200": {
+            "description": "MP4 attachment",
+            "content": {
+              "video/mp4": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or unfinished recording"
+          },
+          "401": {
+            "description": "Authentication required"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Admin: delete recording; active files cannot be deleted",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/webhook": {
+      "post": {
+        "summary": "LiveKit webhook: verify JWT issuer, signature, expiration and raw-body SHA-256",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated or forbidden role"
+          },
+          "403": {
+            "description": "Origin mismatch, or guest not admitted"
+          },
+          "409": {
+            "description": "Stale program revision"
+          },
+          "502": {
+            "description": "Media service or persistence unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "webhook": []
+          }
+        ]
+      }
+    },
+    "/api/v1/assets": {
+      "get": {
+        "summary": "Admin: list persistent image and video library",
+        "responses": {
+          "200": {
+            "description": "Library",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Asset"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Admin: stream an image/video file into the library",
+        "description": "Raw binary body. X-File-Name contains the UTF-8 filename encoded as base64. Header MIME type must match the file signature. Uploading never automatically changes the program. Images: 20 MB; videos: 500 MB.",
+        "parameters": [
+          {
+            "name": "X-File-Name",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "image/png": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "image/webp": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "video/mp4": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "video/webm": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored asset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Asset"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid format, signature or file name"
+          },
+          "401": {
+            "description": "Not authorized"
+          },
+          "413": {
+            "description": "Image exceeds 20 MB or video exceeds 500 MB"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Admin or admitted participant: read asset; scoped renderer may only read current program content or stage background",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "rendererQuery": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Asset content"
+          },
+          "206": {
+            "description": "Requested byte range"
+          },
+          "401": {
+            "description": "No valid session or renderer scope"
+          },
+          "416": {
+            "description": "Invalid byte range"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Admin: delete a library asset; selected program content must first be retired",
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          },
+          "400": {
+            "description": "Asset is in program or missing"
+          },
+          "401": {
+            "description": "Not authorized"
+          }
+        }
+      }
+    },
+    "/api/v1/destinations": {
+      "get": {
+        "summary": "Admin: safe destinations, per-destination state, presets and encoding profiles; never returns URLs or keys",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input or broadcast in progress"
+          },
+          "401": {
+            "description": "Administrator session required"
+          }
+        }
+      },
+      "post": {
+        "summary": "Admin: add one of up to five simultaneous destinations",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "platform": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string",
+                    "maxLength": 40
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "RTMP/RTMPS server; omitted to use the platform default"
+                  },
+                  "key": {
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "landscape",
+                      "portrait"
+                    ],
+                    "default": "landscape"
+                  }
+                },
+                "required": [
+                  "platform",
+                  "key"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input or broadcast in progress"
+          },
+          "401": {
+            "description": "Administrator session required"
+          }
+        }
+      }
+    },
+    "/api/v1/destinations/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "summary": "Admin: atomically edit name, format, enabled state or encrypted credentials while stopped. Replacing URL requires key; key-only preserves saved server.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 40
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "RTMP/RTMPS server; omitted to use the platform default"
+                  },
+                  "key": {
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "landscape",
+                      "portrait"
+                    ],
+                    "default": "landscape"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": []
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input or broadcast in progress"
+          },
+          "401": {
+            "description": "Administrator session required"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Admin: remove a destination while stopped",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input or broadcast in progress"
+          },
+          "401": {
+            "description": "Administrator session required"
+          }
+        }
+      }
+    },
+    "/api/v1/scenes": {
+      "post": {
+        "summary": "Admin: save the current composition for a format; maximum twenty scenes",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 40
+                  },
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "landscape",
+                      "portrait"
+                    ],
+                    "default": "landscape"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input or broadcast in progress"
+          },
+          "401": {
+            "description": "Administrator session required"
+          }
+        }
+      }
+    },
+    "/api/v1/scenes/{id}/activate": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "summary": "Admin: activate saved scene in its own format, incrementing that program revision",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input or broadcast in progress"
+          },
+          "401": {
+            "description": "Administrator session required"
+          }
+        }
+      }
+    },
+    "/api/v1/scenes/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "delete": {
+        "summary": "Admin: delete a saved scene",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input or broadcast in progress"
+          },
+          "401": {
+            "description": "Administrator session required"
+          }
+        }
+      }
+    },
+    "/api/v1/remote-server": {
+      "get": {
+        "summary": "Admin: Read safe configuration / register by URL / disconnect",
+        "responses": {
+          "200": {
+            "description": "Safe response; never includes installation credentials"
+          },
+          "400": {
+            "description": "Invalid URL or remote operation failed"
+          },
+          "401": {
+            "description": "Local administrator required"
+          },
+          "409": {
+            "description": "Incompatible remote protocol"
+          }
+        }
+      },
+      "put": {
+        "summary": "Admin: Read safe configuration / register by URL / disconnect",
+        "responses": {
+          "200": {
+            "description": "Safe response; never includes installation credentials"
+          },
+          "400": {
+            "description": "Invalid URL or remote operation failed"
+          },
+          "401": {
+            "description": "Local administrator required"
+          },
+          "409": {
+            "description": "Incompatible remote protocol"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Admin: Read safe configuration / register by URL / disconnect",
+        "responses": {
+          "200": {
+            "description": "Safe response; never includes installation credentials"
+          },
+          "400": {
+            "description": "Invalid URL or remote operation failed"
+          },
+          "401": {
+            "description": "Local administrator required"
+          },
+          "409": {
+            "description": "Incompatible remote protocol"
+          }
+        }
+      }
+    },
+    "/api/v1/remote-server/check": {
+      "post": {
+        "summary": "Admin: Check service and protocol without enrollment",
+        "responses": {
+          "200": {
+            "description": "Safe response; never includes installation credentials"
+          },
+          "400": {
+            "description": "Invalid URL or remote operation failed"
+          },
+          "401": {
+            "description": "Local administrator required"
+          },
+          "409": {
+            "description": "Incompatible remote protocol"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/remote-session": {
+      "post": {
+        "summary": "Admin: Create or close remote session",
+        "responses": {
+          "200": {
+            "description": "Safe response; never includes installation credentials"
+          },
+          "400": {
+            "description": "Invalid URL or remote operation failed"
+          },
+          "401": {
+            "description": "Local administrator required"
+          },
+          "409": {
+            "description": "Incompatible remote protocol"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Admin: Create or close remote session",
+        "responses": {
+          "200": {
+            "description": "Safe response; never includes installation credentials"
+          },
+          "400": {
+            "description": "Invalid URL or remote operation failed"
+          },
+          "401": {
+            "description": "Local administrator required"
+          },
+          "409": {
+            "description": "Incompatible remote protocol"
+          }
+        }
+      }
+    },
+    "/api/v1/remote-session/invitations": {
+      "post": {
+        "summary": "Admin: Create remote invitation",
+        "responses": {
+          "200": {
+            "description": "Safe response; never includes installation credentials"
+          },
+          "400": {
+            "description": "Invalid URL or remote operation failed"
+          },
+          "401": {
+            "description": "Local administrator required"
+          },
+          "409": {
+            "description": "Incompatible remote protocol"
+          }
+        }
+      }
+    },
+    "/api/v1/remote-session/invitations/{id}": {
+      "delete": {
+        "summary": "Admin: Revoke remote invitation",
+        "responses": {
+          "200": {
+            "description": "Safe response; never includes installation credentials"
+          },
+          "400": {
+            "description": "Invalid URL or remote operation failed"
+          },
+          "401": {
+            "description": "Local administrator required"
+          },
+          "409": {
+            "description": "Incompatible remote protocol"
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/remote-session/participants/{id}": {
+      "post": {
+        "summary": "Admin: Remote admission decision",
+        "responses": {
+          "200": {
+            "description": "Safe response; never includes installation credentials"
+          },
+          "400": {
+            "description": "Invalid URL or remote operation failed"
+          },
+          "401": {
+            "description": "Local administrator required"
+          },
+          "409": {
+            "description": "Incompatible remote protocol"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "action"
+                ],
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "admit",
+                      "reject",
+                      "remove"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "sh_session"
+      },
+      "renderer": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "webhook": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      },
+      "rendererQuery": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "render_token"
+      }
+    },
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Program": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "layout": {
+            "type": "string",
+            "enum": [
+              "grid",
+              "spotlight",
+              "screen"
+            ]
+          },
+          "identities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 6,
+            "uniqueItems": true
+          },
+          "spotlight": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "screen": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "screen_audio": {
+            "type": "boolean"
+          },
+          "names": {
+            "type": "boolean"
+          },
+          "logo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 400000,
+            "description": "PNG/JPEG data URL only"
+          },
+          "media_asset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Select an uploaded asset instead of a shared screen; source references are mutually exclusive."
+          },
+          "content_mode": {
+            "type": "string",
+            "enum": [
+              "side",
+              "pip",
+              "full"
+            ],
+            "default": "side"
+          },
+          "pip_position": {
+            "type": "string",
+            "enum": [
+              "bottom_right",
+              "bottom_left",
+              "top_right",
+              "top_left"
+            ],
+            "default": "bottom_right"
+          },
+          "microphones_enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "background": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$",
+            "default": "#101923"
+          },
+          "playback": {
+            "$ref": "#/components/schemas/Playback"
+          },
+          "background_asset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null,
+            "description": "An existing library image used as the stage backdrop, independently of camera and content sources."
+          }
+        },
+        "required": [
+          "revision",
+          "layout",
+          "identities",
+          "spotlight",
+          "screen",
+          "screen_audio",
+          "names",
+          "logo"
+        ]
+      },
+      "Participant": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "waiting",
+              "admitted",
+              "removed"
+            ]
+          },
+          "connected": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "connected"
+        ]
+      },
+      "Broadcast": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "egress_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "starting",
+              "live",
+              "reconnecting",
+              "ending",
+              "complete",
+              "error",
+              "uncertain"
+            ]
+          },
+          "created": {
+            "type": "integer"
+          },
+          "ended": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "renderer_revision": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "egress_id",
+          "status",
+          "created",
+          "ended",
+          "error",
+          "renderer_revision"
+        ]
+      },
+      "Studio": {
+        "type": "object",
+        "properties": {
+          "program": {
+            "$ref": "#/components/schemas/Program"
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Participant"
+            }
+          },
+          "broadcast": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Broadcast"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "destination_configured": {
+            "type": "boolean"
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Asset"
+            }
+          },
+          "server_time_ms": {
+            "type": "integer",
+            "description": "Use this to compensate the viewer clock when rendering video."
+          }
+        },
+        "required": [
+          "program",
+          "participants",
+          "broadcast",
+          "destination_configured"
+        ]
+      },
+      "Recording": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "recording",
+              "complete",
+              "interrupted",
+              "missing"
+            ]
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "duration": {
+            "type": "number",
+            "description": "Seconds"
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "created",
+          "status",
+          "bytes",
+          "duration"
+        ]
+      },
+      "Invitation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "expires": {
+            "type": "integer"
+          },
+          "revoked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "expires",
+          "revoked"
+        ]
+      },
+      "Playback": {
+        "type": "object",
+        "properties": {
+          "playing": {
+            "type": "boolean",
+            "default": false
+          },
+          "position": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 86400,
+            "description": "Base position in seconds"
+          },
+          "started_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Server playback clock. Send null with a control change to anchor it again."
+          },
+          "volume": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 1
+          },
+          "looped": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "Asset": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "created": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "filename",
+          "mime",
+          "kind",
+          "bytes",
+          "created"
+        ]
+      },
+      "OutputFormat": {
+        "type": "string",
+        "enum": [
+          "landscape",
+          "portrait"
+        ],
+        "default": "landscape"
+      }
+    }
+  }
+}

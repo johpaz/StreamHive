@@ -1,0 +1,60 @@
+name: ${COMPOSE_PROJECT_NAME:-streamhive-sessions}
+
+x-image: &image
+  image: ${SESSIONS_IMAGE:-johpaz/streamhive-sessions}:${SESSIONS_TAG:-0.1.0}
+x-hardening: &hardening
+  user: "1000:1000"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp:size=64M,mode=1777"]
+  pids_limit: 128
+x-env: &env
+  PUBLIC_URL: https://${SESSIONS_DOMAIN:?Set SESSIONS_DOMAIN in .env}
+  DATA_DIR: /data
+  LISTEN_ADDR: 0.0.0.0:8080
+  RUST_LOG: streamhive_sessions=info
+
+services:
+  sessions-migrate:
+    <<: [*image, *hardening]
+    restart: "no"
+    command: ["migrate"]
+    environment: *env
+    volumes: ["sessions-data:/data"]
+    networks: [backend]
+    mem_limit: 128m
+    cpus: 0.5
+    healthcheck: { disable: true }
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  sessions:
+    <<: [*image, *hardening]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    expose: ["8080"]
+    mem_limit: ${SESSIONS_MEMORY_LIMIT:-384m}
+    cpus: ${SESSIONS_CPU_LIMIT:-0.5}
+    environment:
+      <<: *env
+      TRUST_PROXY: "true"
+      REGISTRATIONS_PER_HOUR: ${REGISTRATIONS_PER_HOUR:-120}
+      REQUESTS_PER_MINUTE: ${REQUESTS_PER_MINUTE:-600}
+      MAX_CONNECTIONS: ${MAX_CONNECTIONS:-1000}
+    volumes: ["sessions-data:/data"]
+    networks: [backend]
+    depends_on:
+      sessions-migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "streamhive-sessions", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+networks:
+  backend:
+    internal: true
+volumes:
+  sessions-data:

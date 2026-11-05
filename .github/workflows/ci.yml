@@ -1,0 +1,13 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.4.3 }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: bun install --cwd frontend --frozen-lockfile
+      - run: bash scripts/check.sh

@@ -1,0 +1,32 @@
+appId: app.streamhive.desktop
+copyright: Copyright © 2026 Johpaz/StreamHive contributors (MIT)
+productName: StreamHive
+directories: { output: dist }
+files: [main.js, preload.js, package.json]
+extraResources:
+  - { from: build/icon.png, to: icon.png }
+  - { from: resources/bin, to: bin }
+  - { from: resources/web, to: web }
+  - { from: ../../LICENSE, to: LICENSE }
+  - { from: ../../packaging/THIRD_PARTY_NOTICES.md, to: THIRD_PARTY_NOTICES.md }
+linux:
+  icon: build/icons
+  desktop:
+    entry:
+      StartupWMClass: streamhive-desktop
+  target: [AppImage, tar.gz]
+  category: AudioVideo
+win:
+  icon: build/icon.ico
+  target: [nsis]
+nsis:
+  shortcutName: StreamHive
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+mac:
+  icon: build/icon.icns
+  target: [dmg]
+  category: public.app-category.video
+  extendInfo:
+    NSCameraUsageDescription: StreamHive necesita la cámara para el directo.
+    NSMicrophoneUsageDescription: StreamHive necesita el micrófono para el directo.

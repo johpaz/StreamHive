@@ -1,0 +1,27 @@
+services:
+  sessions:
+    networks: [backend, traefik-proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-n8n_evoapi}
+      - traefik.http.routers.streamhive-sessions.rule=Host(`${SESSIONS_DOMAIN}`)
+      - traefik.http.routers.streamhive-sessions.entrypoints=${TRAEFIK_HTTPS_ENTRYPOINT:-websecure}
+      - traefik.http.routers.streamhive-sessions.tls=true
+      - traefik.http.routers.streamhive-sessions.tls.certresolver=${TRAEFIK_CERTRESOLVER:-mytlschallenge}
+      - traefik.http.routers.streamhive-sessions.service=streamhive-sessions
+      - traefik.http.routers.streamhive-sessions.middlewares=streamhive-sessions-headers@docker
+      - traefik.http.services.streamhive-sessions.loadbalancer.server.port=8080
+      - traefik.http.middlewares.streamhive-sessions-headers.headers.STSSeconds=31536000
+      - traefik.http.middlewares.streamhive-sessions-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.streamhive-sessions-headers.headers.referrerPolicy=no-referrer
+      - traefik.http.routers.streamhive-sessions-http.rule=Host(`${SESSIONS_DOMAIN}`)
+      - traefik.http.routers.streamhive-sessions-http.entrypoints=${TRAEFIK_HTTP_ENTRYPOINT:-web}
+      - traefik.http.routers.streamhive-sessions-http.middlewares=streamhive-sessions-https@docker
+      - traefik.http.routers.streamhive-sessions-http.service=streamhive-sessions
+      - traefik.http.middlewares.streamhive-sessions-https.redirectscheme.scheme=https
+      - traefik.http.middlewares.streamhive-sessions-https.redirectscheme.permanent=true
+
+networks:
+  traefik-proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK:-n8n_evoapi}

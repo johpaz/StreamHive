@@ -1,0 +1,17 @@
+.git
+.agents
+.codex
+.aws
+.env
+runtime
+target
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/public/livekit-client.umd.js*
+deploy/generated
+
+frontend/public/effects
+
+sessions/web/guest.js
+deploy/sessions/.env

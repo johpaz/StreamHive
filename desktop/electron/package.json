@@ -1,0 +1,18 @@
+{
+  "name": "streamhive-desktop",
+  "version": "0.1.0",
+  "description": "StreamHive: estudio de streaming local, sin nube",
+  "private": true,
+  "main": "main.js",
+  "author": "Johpaz/StreamHive contributors",
+  "scripts": {
+    "start": "electron .",
+    "pack": "bun ../../scripts/check-desktop-icons.mjs && electron-builder --dir",
+    "dist": "bun ../../scripts/check-desktop-icons.mjs && electron-builder"
+  },
+  "devDependencies": {
+    "electron": "45.2.1",
+    "electron-builder": "26.0.12"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,591 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "StreamHive Sessions control API",
+    "version": "0.1.0",
+    "description": "Control only. No media tokens, tracks, recordings or administrative global credentials. All epoch times are seconds. Session/invitation TTL: 24 hours. Browser writes and guest sockets must use the configured public origin. Reconnect by fetching a fresh snapshot; revisions are monotonic for persisted mutations."
+  },
+  "paths": {
+    "/api/v1/meta": {
+      "get": {
+        "summary": "Service identity, protocol=1 and media=false",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/installations": {
+      "post": {
+        "summary": "Register automatically; returns installation_id and a one-time 256-bit credential",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/sessions/current": {
+      "get": {
+        "summary": "Get current active session or session:null",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "installation": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Create or reuse the installation\u2019s sole active session",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "installation": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sessions/{sid}": {
+      "get": {
+        "summary": "Owner snapshot: session, participants and safe invitation metadata",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "installation": []
+          }
+        ]
+      },
+      "parameters": [
+        {
+          "name": "sid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/sessions/{sid}/close": {
+      "post": {
+        "summary": "Idempotently close an owned session",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "installation": []
+          }
+        ]
+      },
+      "parameters": [
+        {
+          "name": "sid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/sessions/{sid}/invitations": {
+      "post": {
+        "summary": "Create an invitation; returns id, HTTPS URL and expires timestamp",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "installation": []
+          }
+        ]
+      },
+      "parameters": [
+        {
+          "name": "sid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/invitations/{iid}": {
+      "delete": {
+        "summary": "Revoke owned invitation and remove its participants",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "installation": []
+          }
+        ]
+      },
+      "parameters": [
+        {
+          "name": "iid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/sessions/{sid}/participants/{pid}": {
+      "post": {
+        "summary": "Admit, reject or remove an owned participant",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "installation": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "action"
+                ],
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "admit",
+                      "reject",
+                      "remove"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "sid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "pid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/join/{token}": {
+      "post": {
+        "summary": "Join waiting room; sets HttpOnly/SameSite=Strict guest cookie",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 60
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "Resume cookie session only if it belongs to this invitation",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "guest": []
+          }
+        ]
+      },
+      "parameters": [
+        {
+          "name": "token",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/v1/guest": {
+      "get": {
+        "summary": "Own guest state only; guest cookie required",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "guest": []
+          }
+        ]
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "summary": "WebSocket: initial and updated {type:snapshot,data:...}; installation bearer header or guest cookie required",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "installation": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "guest": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "sh_guest"
+      }
+    }
+  }
+}

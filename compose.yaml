@@ -1,0 +1,105 @@
+name: streamhive
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      RECORDINGS_DIR: /recordings
+      LIVEKIT_INTERNAL_URL: http://host.docker.internal:7880
+      RENDERER_URL: http://127.0.0.1:8081/render
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./runtime/data:/data
+      - ./runtime/recordings:/recordings
+    ports:
+      - 127.0.0.1:8080:8080
+    depends_on:
+      redis:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      LIVEKIT_DOMAIN: ${LIVEKIT_DOMAIN}
+      TURN_DOMAIN: ${TURN_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - 80:80
+      - 127.0.0.1:8443:443
+      - 127.0.0.1:8081:8081
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+  edge:
+    image: haproxy:3.2.6-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./deploy/generated/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - web
+  redis:
+    image: redis:7.4.2-alpine
+    restart: unless-stopped
+    command: [redis-server, --bind, 0.0.0.0, --protected-mode, 'yes', --requirepass, '${REDIS_PASSWORD:?Run scripts/configure.py first}', --appendonly, 'yes']
+    ports:
+      - 127.0.0.1:6379:6379
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [CMD-SHELL, 'redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    restart: unless-stopped
+    network_mode: host
+    command: [--config, /etc/livekit.yaml]
+    volumes:
+      - ./deploy/generated/livekit.yaml:/etc/livekit.yaml:ro
+      - caddy_data:/caddy:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_started
+  egress:
+    image: livekit/egress:v1.15.0
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      EGRESS_CONFIG_FILE: /etc/egress.yaml
+    volumes:
+      - ./deploy/generated/egress.yaml:/etc/egress.yaml:ro
+      - ./runtime/recordings:/recordings
+    user: "1000:1000"
+    shm_size: 1gb
+    cap_add:
+      - SYS_ADMIN
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    stop_grace_period: 90s
+volumes:
+  caddy_data:
+  caddy_config:
+  redis_data:
