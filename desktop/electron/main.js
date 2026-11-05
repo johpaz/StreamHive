@@ -162,8 +162,18 @@ async function enter() {
     return r.status === 204;
   } catch { return false; }
 }
-function showPassword() {
-  dialog.showMessageBox(mainWindow, { title: "StreamHive", message: "Contraseña de administrador", detail: `${adminPassword}\n\nSolo hace falta si abres el estudio desde otro navegador o equipo.` });
+/** Clave vigente de esta app: la de Configuración si se regeneró, o la inicial. */
+async function accessKey() {
+  try {
+    await enter();
+    const r = await session.defaultSession.fetch(`${base}/api/v1/settings/access`, { credentials: "include" });
+    if (r.ok) { const { key } = await r.json(); if (key) return key; }
+  } catch {}
+  return adminPassword;
+}
+async function showPassword() {
+  const key = await accessKey();
+  dialog.showMessageBox(mainWindow, { title: "StreamHive", message: "Clave de acceso de esta app", detail: `${key}\n\nSolo hace falta si abres el estudio desde otro navegador o equipo. Puedes verla, copiarla o regenerarla en Configuración → Tu perfil.` });
 }
 
 function openRenderer(rel) {
@@ -200,6 +210,9 @@ if (primary) app.whenReady().then(async () => {
     desktopCapturer.getSources({ types: ["screen", "window"] }).then((s) => cb(s[0] ? { video: s[0], audio: "loopback" } : {}), () => cb({}));
   }, { useSystemPicker: true });
 
+  // Si la sesión del estudio se pierde (por ejemplo, al regenerar la clave en otro equipo),
+  // la app vuelve a entrar sola con su token: nunca hay que cerrarla.
+  ipcMain.handle("session:enter", (e) => origin(e.senderFrame.url) === origin(base) ? enter() : false);
   ipcMain.handle("renderer:open", (e, rel) => {
     if (typeof rel !== "string" || !rel.startsWith("/render?") || origin(e.senderFrame.url) !== origin(base)) return;
     openRenderer(rel + (process.env.STREAMHIVE_RENDER_PARAMS || ""));
@@ -235,12 +248,12 @@ if (primary) app.whenReady().then(async () => {
   setInterval(enter, 6 * 3600 * 1000).unref(); // la sesión dura 12 h: se renueva sin que el usuario haga nada
   void mainWindow.loadURL(base);
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { label: "StreamHive", submenu: [{ label: "Mostrar contraseña de administrador", click: showPassword }, { type: "separator" }, { role: "quit" }] },
+    { label: "StreamHive", submenu: [{ label: "Mostrar clave de acceso de esta app", click: () => void showPassword() }, { type: "separator" }, { role: "quit" }] },
     { label: "Edición", submenu: [{ role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" }, { role: "copy" }, { role: "paste" }, { role: "selectAll" }] },
     { label: "Ver", submenu: [{ role: "reload" }, { role: "togglefullscreen" }] },
   ]));
   // Con acceso LAN no hay entrada automática: se muestra la contraseña la primera vez.
-  if (!autologinToken && ctx.sec.first && !process.env.STREAMHIVE_FAKE_MEDIA) showPassword();
+  if (!autologinToken && ctx.sec.first && !process.env.STREAMHIVE_FAKE_MEDIA) void showPassword();
   if (process.env.STREAMHIVE_E2E) console.log("STREAMHIVE_READY " + JSON.stringify({ base, password: ctx.sec.admin_password }));
 });
 app.on("window-all-closed", () => app.quit());

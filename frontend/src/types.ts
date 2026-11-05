@@ -89,7 +89,13 @@ export interface Broadcast {
   live?: boolean;
   recording?: boolean;
 }
+export interface Profile {
+  name: string;
+  studio: string;
+  title: string;
+}
 export interface Studio {
+  profile?: Profile | null;
   program: Program;
   portrait_program?: Program;
   scenes?: Scene[];

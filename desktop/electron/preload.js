@@ -5,4 +5,6 @@ contextBridge.exposeInMainWorld("streamhiveDesktop", {
   closeRenderer: () => ipcRenderer.invoke("renderer:close"),
   chooseFolder: (current) => ipcRenderer.invoke("folder:choose", current),
   openFolder: (folder) => ipcRenderer.invoke("folder:open", folder),
+  // Vuelve a entrar al estudio con el token de esta app, sin pedir la clave.
+  enter: () => ipcRenderer.invoke("session:enter"),
 });

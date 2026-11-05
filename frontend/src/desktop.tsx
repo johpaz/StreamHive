@@ -5,11 +5,20 @@ type DesktopBridge = {
   closeRenderer: () => Promise<void>;
   chooseFolder?: (current: string) => Promise<string | null>;
   openFolder?: (folder: string) => Promise<string | void>;
+  enter?: () => Promise<boolean>;
 };
 // Lo expone el preload de Electron (desktop/electron/preload.js).
 export const desktopBridge = (): DesktopBridge | undefined =>
   (window as unknown as { streamhiveDesktop?: DesktopBridge }).streamhiveDesktop;
 export const isDesktop = () => Boolean(desktopBridge());
+/** En la app de escritorio, vuelve a entrar con el token de la app (sin clave). */
+export const desktopEnter = async () => {
+  try {
+    return (await desktopBridge()?.enter?.()) === true;
+  } catch {
+    return false;
+  }
+};
 
 /** En la app de escritorio abre/cierra la ventana oculta del compositor según la emisión. */
 export function DesktopRenderer({ active }: { active: boolean }) {

@@ -405,6 +405,50 @@ pub struct Data {
     /// las escenas no la capturan y el programa se puede preparar debajo sin que se vea.
     #[serde(default)]
     pub active_slate: Option<ActiveSlate>,
+    /// Datos de quien maneja el estudio. Sin valor, la app de escritorio pide la bienvenida.
+    #[serde(default)]
+    pub profile: Option<Profile>,
+}
+/// Quien maneja este estudio: su nombre aparece en el chat y en la barra lateral.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Profile {
+    pub name: String,
+    /// Nombre del estudio, programa o canal (opcional).
+    #[serde(default)]
+    pub studio: String,
+    /// Cómo se presenta: Anfitrión, Moderadora, Producción…
+    #[serde(default = "default_title")]
+    pub title: String,
+}
+fn default_title() -> String {
+    "Anfitrión".into()
+}
+impl Profile {
+    pub fn validate(&mut self) -> Result<(), &'static str> {
+        let clean = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.name = clean(&self.name);
+        self.studio = clean(&self.studio);
+        self.title = clean(&self.title);
+        if self.title.is_empty() {
+            self.title = default_title();
+        }
+        if self.name.is_empty() || self.name.chars().count() > 60 {
+            return Err("Escribe tu nombre (hasta 60 caracteres)");
+        }
+        if self.studio.chars().count() > 80 {
+            return Err("El nombre del estudio admite hasta 80 caracteres");
+        }
+        if self.title.chars().count() > 30 {
+            return Err("El rol admite hasta 30 caracteres");
+        }
+        if [&self.name, &self.studio, &self.title]
+            .iter()
+            .any(|s| s.chars().any(char::is_control))
+        {
+            return Err("Los datos no pueden tener caracteres de control");
+        }
+        Ok(())
+    }
 }
 impl Recording {
     /// Cada grabación sigue en su carpeta aunque luego se elija otra.

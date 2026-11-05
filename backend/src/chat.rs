@@ -28,10 +28,15 @@ impl From<db::Failure> for Error {
 }
 pub async fn identity(s: &App, h: &HeaderMap) -> Result<(String, String, String), Error> {
     let c = s.auth(h)?;
-    if c.role == "admin" {
-        return Ok((c.sub, "Anfitrión".into(), "admin".into()));
-    }
     let d = s.data.lock().await;
+    if c.role == "admin" {
+        // En el chat se ve el nombre del perfil; la etiqueta "Anfitrión" la pone el rol.
+        let name = d
+            .profile
+            .as_ref()
+            .map_or_else(|| "Anfitrión".into(), |p| p.name.clone());
+        return Ok((c.sub, name, "admin".into()));
+    }
     let p = d.participants.get(&c.sub).ok_or_else(denied)?;
     let role = guest_role(&p.status).ok_or_else(denied)?;
     Ok((c.sub, p.name.clone(), role.into()))

@@ -32,9 +32,30 @@ try {
   const page = await app.firstWindow();
   const errors = []; page.on("pageerror", (e) => errors.push(e.message));
   const origin = info.base;
-  // Entrada automática: no debe aparecer ninguna pantalla de contraseña.
-  await page.getByRole("heading", { name: "Mi estudio" }).waitFor({ timeout: 20000 });
+  // Entrada automática: no debe aparecer ninguna pantalla de contraseña, sino la bienvenida.
+  await page.getByRole("heading", { name: "Hola, empecemos." }).waitFor({ timeout: 20000 });
   assert((await page.getByLabel("Contraseña de administrador").count()) === 0, "apareció la pantalla de contraseña");
+  // La clave de la app ya existe y es la misma que muestra el menú.
+  await page.getByRole("button", { name: "Mostrar" }).click();
+  const key = (await page.getByLabel("Clave de acceso de esta app").textContent()).trim();
+  assert(key === info.password, "la bienvenida no muestra la clave de esta app");
+  await page.getByLabel("Tu nombre").fill("Johana Prueba");
+  await page.getByLabel("Nombre del estudio, programa o canal").fill("La Colmena");
+  await page.getByRole("button", { name: "Abrir mi estudio →" }).click();
+  await page.getByRole("heading", { name: "Mi estudio" }).waitFor({ timeout: 20000 });
+  await page.getByRole("button", { name: /Tu perfil: Johana Prueba/ }).waitFor();
+  // El botón del perfil no cierra la sesión: abre Configuración → Tu perfil.
+  await page.getByRole("button", { name: /Tu perfil: Johana Prueba/ }).click();
+  await page.getByRole("heading", { name: "Tu perfil" }).waitFor();
+  assert((await page.getByText("Cerrar sesión ↗").count()) === 0, "la app de escritorio no debe ofrecer cerrar sesión");
+  // Si la sesión se pierde, la app vuelve a entrar sola sin pedir la clave.
+  await page.evaluate(() => fetch("/api/v1/logout", { method: "POST" }));
+  await page.waitForTimeout(6500);
+  assert((await page.getByLabel("Contraseña de administrador").count()) === 0, "pidió la clave tras perder la sesión");
+  assert((await page.evaluate(() => fetch("/api/v1/me").then((r) => r.status))) === 200, "no volvió a entrar sola");
+  await page.getByRole("button", { name: /Estudio en vivo/ }).first().click();
+  await page.getByRole("heading", { name: "Mi estudio" }).waitFor();
+  console.log("bienvenida, perfil y entrada automática OK");
   console.log("webrtc en Electron:", await page.evaluate(() => typeof RTCPeerConnection));
   await page.getByRole("button", { name: "Probar dispositivos", exact: true }).click();
   await page.getByRole("button", { name: "Probar cámara y micrófono" }).click();

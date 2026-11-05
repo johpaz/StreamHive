@@ -226,6 +226,92 @@ i {
 .account small {
   font-size: 10px;
 }
+.account > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.account > div,
+.account small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account:hover small,
+.account:focus-visible small {
+  color: var(--accent);
+}
+.account-logout {
+  margin-top: 8px;
+  font-size: 10px;
+}
+.profile-form {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0 22px;
+}
+.profile-form > .button {
+  justify-self: start;
+}
+.profile-panel h3 {
+  font-size: 14px;
+  margin: 8px 0 4px;
+}
+.access-key {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+.access-key-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.access-key code {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  background: #0b1016;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+.access-key > .text-button {
+  justify-self: start;
+}
+.access-key-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid #6b3a3f;
+  border-radius: 10px;
+  padding: 12px;
+}
+.access-key-confirm p {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+}
+.welcome-card form {
+  display: grid;
+  gap: 14px;
+}
+.welcome-key {
+  display: grid;
+  gap: 4px;
+  padding: 14px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+.welcome-key small {
+  font-size: 11px;
+  color: #a5b2ad;
+}
 main {
   margin-left: 230px;
   flex: 1;

@@ -1,7 +1,8 @@
 import { StudioChat } from "./StudioChat";
 import { chatSignal } from "./chat";
 import React, { useEffect, useState } from "react";
-import { DesktopRenderer } from "./desktop";
+import { DesktopRenderer, desktopEnter, isDesktop } from "./desktop";
+import { ProfileSettings, Welcome, initials } from "./Account";
 import { audioMode, loadAudioMode } from "./audio-quality";
 import { RemoteSessions } from "./RemoteSessions";
 import { Scenes } from "./Scenes";
@@ -75,16 +76,25 @@ function App() {
       setStudio(next);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
+        // La app de escritorio nunca se queda fuera: vuelve a entrar con su token.
+        if (!joinToken && (await desktopEnter())) return;
         setMe(null);
         await media.disconnect();
       } else setError(String(e));
     }
   };
   useEffect(() => {
-    void api<Me>("/me")
-      .then(setMe)
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    const load = async () => {
+      try {
+        setMe(await api<Me>("/me"));
+      } catch {
+        if (!joinToken && (await desktopEnter()))
+          setMe(await api<Me>("/me").catch(() => null));
+      } finally {
+        setLoading(false);
+      }
+    };
+    void load();
   }, []);
   useEffect(() => {
     if (!me) return;
@@ -205,6 +215,27 @@ function App() {
       />
     );
   const admin = me.role === "admin";
+  // Bienvenida: la primera vez en la app de escritorio se piden los datos del anfitrión.
+  if (admin && studio && !studio.profile && isDesktop())
+    return <Welcome onDone={() => void refresh()} />;
+  const desktopApp = isDesktop();
+  const profile = studio?.profile;
+  const openProfile = () => {
+    setTab("settings");
+    setTimeout(
+      () =>
+        document
+          .getElementById("perfil")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" }),
+      50,
+    );
+  };
+  const logout = () =>
+    run(async () => {
+      await api("/logout", "POST");
+      await media.disconnect();
+      setMe(null);
+    });
   const broadcast = studio?.broadcast;
   const running = Boolean(
     broadcast &&
@@ -280,29 +311,46 @@ function App() {
           <div className="local-badge">
             <i /> Alojado en tu servidor
           </div>
-          <button
-            title="Cerrar sesión"
-            className="account"
-            onClick={() =>
-              run(async () => {
-                await api("/logout", "POST");
-                await media.disconnect();
-                setMe(null);
-              })
-            }
-          >
-            <span className="workspace-avatar">{admin ? "A" : "I"}</span>
-            <div>
-              {admin ? "Administrador" : names[me.id] || "Invitado"}
-              <small>Cerrar sesión ↗</small>
-            </div>
-          </button>
+          {admin ? (
+            <>
+              <button
+                title="Tu perfil"
+                aria-label={`Tu perfil: ${profile?.name || "completa tus datos"}`}
+                className="account"
+                onClick={openProfile}
+              >
+                <span className="workspace-avatar">{initials(profile?.name)}</span>
+                <div>
+                  {profile?.name || "Tu perfil"}
+                  <small>
+                    {profile ? `${profile.title} · Editar perfil` : "Completa tus datos"}
+                  </small>
+                </div>
+              </button>
+              {/* En la app de escritorio no hay que salir: la sesión es de esta app. */}
+              {!desktopApp && (
+                <button className="text-button account-logout" onClick={logout}>
+                  Cerrar sesión ↗
+                </button>
+              )}
+            </>
+          ) : (
+            <button title="Salir" className="account" onClick={logout}>
+              <span className="workspace-avatar">{initials(names[me.id] || "Invitado")}</span>
+              <div>
+                {names[me.id] || "Invitado"}
+                <small>Salir ↗</small>
+              </div>
+            </button>
+          )}
         </div>
       </aside>
       <main>
         <header className="topbar">
           <div>
-            <span className="eyebrow">TU ESPACIO PARA CONECTAR</span>
+            <span className="eyebrow">
+              {profile?.studio ? profile.studio.toUpperCase() : "TU ESPACIO PARA CONECTAR"}
+            </span>
             <h1>
               {tab === "studio"
                 ? "Estudio en vivo"
@@ -354,17 +402,8 @@ function App() {
               </button>
             </>
           )}
-          <button
-            onClick={() =>
-              run(async () => {
-                await api("/logout", "POST");
-                await media.disconnect();
-                setMe(null);
-              })
-            }
-          >
-            Salir
-          </button>
+          {admin && <button onClick={openProfile}>Perfil</button>}
+          {!(admin && desktopApp) && <button onClick={logout}>Salir</button>}
         </nav>
         <div className="content">
           {error && (
@@ -527,6 +566,7 @@ function App() {
           )}
           {tab === "settings" && admin && (
             <div className="settings-grid">
+              <ProfileSettings profile={profile} onSaved={() => void refresh()} />
               <RemoteSessions version={studio} pending={pending} run={run} settings onInvite={(url)=>{setInvite(url);setInviteCa("");}} />
               {studio && <Slates studio={studio} run={run} pending={pending} />}
               <section className="panel">

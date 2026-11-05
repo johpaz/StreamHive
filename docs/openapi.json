@@ -2666,6 +2666,108 @@
           }
         }
       }
+    },
+    "/api/v1/profile": {
+      "put": {
+        "summary": "Host only: name, studio and role of whoever runs this studio. Shown in the sidebar and as the host's name in the chat; also returned as `profile` in /studio (null until the desktop welcome is completed).",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Profile"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved (whitespace collapsed; empty title becomes Anfitrión)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing name, too long or control characters"
+          },
+          "401": {
+            "description": "Host only"
+          }
+        }
+      }
+    },
+    "/api/v1/settings/access": {
+      "get": {
+        "summary": "Host only: this installation's access key, to open the studio from another browser or device. null when it is not known (server installs that set ADMIN_PASSWORD directly).",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "desktop": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Host only"
+          }
+        }
+      },
+      "post": {
+        "summary": "Host only: generate a new readable key (XXXXX-XXXXX-XXXXX-XXXXX). Admin sessions issued before it stop working; the caller receives a fresh session cookie. Guest sessions are not affected.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New key, shown once here and later in GET",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Host only"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3240,6 +3342,30 @@
           "size": {
             "type": "integer",
             "maximum": 26214400
+          }
+        }
+      },
+      "Profile": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "studio": {
+            "type": "string",
+            "maxLength": 80,
+            "description": "Studio, show or channel name (optional)"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 30,
+            "default": "Anfitrión",
+            "description": "How the host presents themselves: Anfitrión, Moderadora…"
           }
         }
       }

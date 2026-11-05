@@ -1,3 +1,4 @@
+mod account;
 mod assets;
 mod chat;
 mod chat_store;
@@ -30,7 +31,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
 };
 use tokio::sync::{Mutex, broadcast};
 
@@ -60,7 +64,9 @@ struct App {
     renderer_base: String,
     session_secret: String,
     master: Vec<u8>,
-    admin_hash: String,
+    admin_hash: Arc<StdMutex<String>>,
+    /// Sesiones de administrador anteriores a este instante (al regenerar la clave) no valen.
+    admin_since: Arc<AtomicU64>,
     video_bitrate: u32,
     audio_bitrate: u32,
     recordings: PathBuf,
@@ -164,7 +170,11 @@ impl App {
             .find(|(k, _)| *k == "sh_session")
             .map(|(_, v)| v)
             .ok_or_else(denied)?;
-        verify(&self.session_secret, token).map_err(|_| denied())
+        let c = verify(&self.session_secret, token).map_err(|_| denied())?;
+        if c.role == "admin" && c.iat < self.admin_since.load(AtomicOrdering::SeqCst) {
+            return Err(denied());
+        }
+        Ok(c)
     }
     fn admin(&self, h: &HeaderMap) -> Result<(), Error> {
         if self.auth(h)?.role != "admin" {
@@ -229,7 +239,7 @@ async fn login(State(s): State<App>, Json(body): Json<Login>) -> Result<Response
             ));
         }
     }
-    let encoded = s.admin_hash.clone();
+    let encoded = s.admin_hash.lock().unwrap().clone();
     let password = body.password;
     let valid = tokio::task::spawn_blocking(move || {
         PasswordHash::new(&encoded).ok().is_some_and(|p| {
@@ -430,7 +440,7 @@ fn snapshot(d: &Data) -> Value {
         "broadcast":d.broadcasts.last(),"destination_configured":d.destinations.iter().any(|x|x.enabled),
         "destinations":d.destinations.iter().map(|x|json!({"id":x.id,"name":x.name,"platform":x.platform,"enabled":x.enabled,"format":x.format,"status":destination_state(d,x)})).collect::<Vec<_>>(),
         "assets":d.assets.values().collect::<Vec<_>>(),"server_time_ms":now_ms(),
-        "slates":d.slates,"active_slate":d.active_slate})
+        "slates":d.slates,"active_slate":d.active_slate,"profile":d.profile})
 }
 async fn studio(State(s): State<App>, h: HeaderMap) -> Reply {
     s.participant(&h).await?;
@@ -2419,6 +2429,11 @@ fn router(s: App) -> Router {
             post(remote::decide),
         )
         .route("/api/v1/me", get(me))
+        .route("/api/v1/profile", put(account::profile_update))
+        .route(
+            "/api/v1/settings/access",
+            get(account::access_view).post(account::access_rotate),
+        )
         .route("/api/v1/studio", get(studio))
         .route("/api/v1/status", get(status))
         .route("/api/v1/events", get(events))
@@ -2536,6 +2551,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     if reset_admin {
+        account::forget(&store)?;
         tracing::info!("Administrator password reset");
         return Ok(());
     }
@@ -2549,6 +2565,11 @@ async fn main() -> anyhow::Result<()> {
         master.len() == 32,
         "MASTER_KEY must be 32 bytes encoded as base64"
     );
+    account::remember_initial(&store, &master, &password, &admin_hash)?;
+    let admin_since = store
+        .setting(account::ADMIN_SINCE)?
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
     let lk = livekit::LiveKit {
         endpoint: env("LIVEKIT_INTERNAL_URL", "http://127.0.0.1:7880"),
         public_url: env("LIVEKIT_PUBLIC_URL", "ws://localhost:7880"),
@@ -2630,7 +2651,8 @@ async fn main() -> anyhow::Result<()> {
         renderer_base: env("RENDERER_URL", "http://localhost:5173/render"),
         session_secret,
         master,
-        admin_hash,
+        admin_hash: Arc::new(StdMutex::new(admin_hash)),
+        admin_since: Arc::new(AtomicU64::new(admin_since)),
         video_bitrate: env("VIDEO_BITRATE_KBPS", "6000")
             .parse::<u32>()?
             .clamp(1000, 12000),
@@ -2744,7 +2766,8 @@ mod api_tests {
             renderer_base: "http://web/render".into(),
             session_secret: "session-test-secret".into(),
             master: vec![9; 32],
-            admin_hash: password,
+            admin_hash: Arc::new(StdMutex::new(password)),
+            admin_since: Default::default(),
             video_bitrate: 6000,
             audio_bitrate: 160,
             recordings: std::env::temp_dir(),
@@ -5443,6 +5466,189 @@ mod api_tests {
             .query_row("SELECT COUNT(*) FROM chat_files", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0);
+    }
+    #[tokio::test]
+    async fn profile_is_the_hosts_name_and_only_the_host_edits_it() {
+        let s = app();
+        waiting(&s, "guest").await;
+        let admin = Some(("host", "admin"));
+        let guest = Some(("guest", "guest"));
+        assert!(
+            call(&s, "GET", "/api/v1/studio", admin, Value::Null)
+                .await
+                .2["profile"]
+                .is_null()
+        );
+        let body = json!({"name":"  Johana   Páez ","studio":"La Colmena","title":""});
+        assert_eq!(
+            call(&s, "PUT", "/api/v1/profile", guest, body.clone())
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let saved = call(&s, "PUT", "/api/v1/profile", admin, body).await;
+        assert_eq!(saved.0, StatusCode::OK, "{}", saved.2);
+        assert_eq!(
+            saved.2,
+            json!({"name":"Johana Páez","studio":"La Colmena","title":"Anfitrión"})
+        );
+        let studio = call(&s, "GET", "/api/v1/studio", guest, Value::Null)
+            .await
+            .2;
+        assert_eq!(studio["profile"]["name"], "Johana Páez");
+        for bad_body in [
+            json!({"name":"","studio":"","title":"Moderadora"}),
+            json!({"name":"x".repeat(61),"studio":"","title":""}),
+            json!({"name":"Ana","studio":"x".repeat(81),"title":""}),
+            json!({"name":"Ana\u{7}","studio":"","title":""}),
+        ] {
+            assert_eq!(
+                call(&s, "PUT", "/api/v1/profile", admin, bad_body).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        // El chat muestra su nombre.
+        let sid = call(&s, "GET", "/api/v1/chat/messages", admin, Value::Null)
+            .await
+            .2["conversation_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let sent = call(&s, "POST", "/api/v1/chat/messages", admin, json!({"session_id":sid,"client_message_id":uuid::Uuid::new_v4().to_string(),"text":"Hola"})).await;
+        assert_eq!(sent.2["sender_name"], "Johana Páez");
+        assert_eq!(sent.2["sender_role"], "admin");
+    }
+    #[tokio::test]
+    async fn each_app_has_its_own_access_key_and_regenerating_it_closes_other_sessions() {
+        let s = app();
+        let admin = Some(("host", "admin"));
+        assert_eq!(
+            call(
+                &s,
+                "GET",
+                "/api/v1/settings/access",
+                Some(("guest", "guest")),
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        // La clave inicial de la app se recuerda cifrada si es la vigente.
+        {
+            let store = s.store.lock().unwrap();
+            let hash = s.admin_hash.lock().unwrap().clone();
+            account::remember_initial(&store, &s.master, "otra-clave-incorrecta", &hash).unwrap();
+        }
+        assert!(
+            call(&s, "GET", "/api/v1/settings/access", admin, Value::Null)
+                .await
+                .2["key"]
+                .is_null()
+        );
+        {
+            let store = s.store.lock().unwrap();
+            let hash = s.admin_hash.lock().unwrap().clone();
+            account::remember_initial(&store, &s.master, "correct-test-password", &hash).unwrap();
+        }
+        assert_eq!(
+            call(&s, "GET", "/api/v1/settings/access", admin, Value::Null)
+                .await
+                .2["key"],
+            "correct-test-password"
+        );
+        // Una sesión abierta antes en otro equipo.
+        let old = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &Claims {
+                sub: "host".into(),
+                role: "admin".into(),
+                exp: now() + 3600,
+                iat: now() - 60,
+                iss: "streamhive".into(),
+            },
+            &jsonwebtoken::EncodingKey::from_secret(s.session_secret.as_bytes()),
+        )
+        .unwrap();
+        let me = |cookie: String| {
+            let s = s.clone();
+            async move {
+                router(s.clone())
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/me")
+                            .header(header::ORIGIN, &s.origin)
+                            .header(header::COOKIE, format!("sh_session={cookie}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        assert_eq!(me(old.clone()).await, StatusCode::OK);
+        let rotated = call(&s, "POST", "/api/v1/settings/access", admin, Value::Null).await;
+        assert_eq!(rotated.0, StatusCode::OK);
+        let key = rotated.2["key"].as_str().unwrap().to_owned();
+        assert_eq!(key.len(), 23);
+        assert!(
+            key.chars()
+                .all(|c| c == '-' || "ABCDEFGHJKMNPQRSTUVWXYZ23456789".contains(c))
+        );
+        // Quien regenera sigue dentro con la cookie nueva; la sesión antigua queda fuera.
+        let fresh = rotated.1[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches("sh_session=")
+            .to_owned();
+        assert_eq!(me(fresh).await, StatusCode::OK);
+        assert_eq!(me(old).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            call(&s, "GET", "/api/v1/settings/access", admin, Value::Null)
+                .await
+                .2["key"],
+            key.as_str()
+        );
+        assert_eq!(
+            call(
+                &s,
+                "POST",
+                "/api/v1/login",
+                None,
+                json!({"password":"correct-test-password"})
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&s, "POST", "/api/v1/login", None, json!({"password":key}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        // Las sesiones de invitados no se tocan.
+        waiting(&s, "guest").await;
+        assert_eq!(
+            me(jsonwebtoken::encode(
+                &jsonwebtoken::Header::default(),
+                &Claims {
+                    sub: "guest".into(),
+                    role: "guest".into(),
+                    exp: now() + 3600,
+                    iat: now() - 60,
+                    iss: "streamhive".into()
+                },
+                &jsonwebtoken::EncodingKey::from_secret(s.session_secret.as_bytes()),
+            )
+            .unwrap())
+            .await,
+            StatusCode::OK
+        );
     }
 }
 
