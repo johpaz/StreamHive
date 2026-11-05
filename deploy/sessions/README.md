@@ -4,56 +4,38 @@ Servicio de **sesiones y admisión**, independiente de Hive Cloud. No incluye Li
 
 ## Con tu Traefik
 
-Desde la raíz del repositorio:
-
-```bash
-cp deploy/sessions/.env.example deploy/sessions/.env
-```
-
-Edita `SESSIONS_DOMAIN` con un dominio/subdominio que apunte al VPS. Por ejemplo, `sesiones.hiveagents.io` si controlas ese dominio. La red externa debe ser la misma que utiliza tu Traefik; los valores iniciales coinciden con el ejemplo proporcionado:
+Todo está en un solo archivo, `compose.yaml`. En el VPS solo necesitas ese archivo y un `.env` junto a él con el subdominio, que debe apuntar al VPS:
 
 ```dotenv
-SESSIONS_DOMAIN=sesiones.example.com
-TRAEFIK_NETWORK=n8n_evoapi
-TRAEFIK_HTTPS_ENTRYPOINT=websecure
-TRAEFIK_HTTP_ENTRYPOINT=web
-TRAEFIK_CERTRESOLVER=mytlschallenge
+SESSIONS_DOMAIN=sesiones.hiveagents.io
+SESSIONS_TAG=0.1.0
 ```
 
-Si Traefik ya está instalado y unido a esa red, no crees otro proxy. No se publica el puerto 8080 en el host. Traefik descubre el servicio por labels, termina HTTPS y reenvía HTTP/WebSocket por la red Docker.
+Las etiquetas de Traefik van fijas, como en el resto de servicios del VPS: red externa `n8n_evoapi`, entrypoint `websecure`, resolver `mytlschallenge` y cabeceras HSTS. El servidor está en la red `backend` (compartida con la migración) y en `n8n_evoapi`, por la que entra Traefik. No se publica el puerto 8080 en el host: Traefik termina HTTPS y reenvía HTTP/WebSocket por la red Docker.
 
-**La imagen local está verificada; la etiqueta de Docker Hub no estará disponible hasta publicar la release.** Para construir desde este repositorio sin esperar a Docker Hub:
+```bash
+docker compose -f compose.yaml --env-file .env pull
+docker compose -f compose.yaml --env-file .env up -d
+```
+
+El job `sessions-migrate` prepara el volumen antes de arrancar el servicio. Comprueba `/healthz`, `/readyz` y `/api/v1/meta` sobre HTTPS. No incluyas una ruta adicional en la URL configurada en la app. Para cambiar de versión, edita `SESSIONS_TAG` en `.env` y repite ambos comandos.
+
+Para construir la imagen desde este repositorio sin esperar a Docker Hub, desde la raíz:
 
 ```bash
 docker compose --env-file deploy/sessions/.env \
   -f deploy/sessions/compose.yaml \
-  -f deploy/sessions/compose.traefik.yaml \
   -f deploy/sessions/compose.build.yaml up -d --build
 ```
-
-Cuando `johpaz/streamhive-sessions:0.1.0` esté publicado:
-
-```bash
-docker compose --env-file deploy/sessions/.env \
-  -f deploy/sessions/compose.yaml \
-  -f deploy/sessions/compose.traefik.yaml pull
-
-docker compose --env-file deploy/sessions/.env \
-  -f deploy/sessions/compose.yaml \
-  -f deploy/sessions/compose.traefik.yaml up -d
-```
-
-El job `sessions-migrate` prepara el volumen antes de arrancar el servicio. Comprueba `/healthz`, `/readyz` y `/api/v1/meta` sobre HTTPS. No incluyas una ruta adicional en la URL configurada en la app.
 
 ## VPS sin Traefik
 
-Configura `SESSIONS_DOMAIN` y `ACME_EMAIL`, y utiliza `compose.caddy.yaml` en lugar de `compose.traefik.yaml`. Esa variante ocupa 80/443, requiere que estén disponibles y gestiona certificados públicos automáticamente. No combines ambos proxies.
+Configura `SESSIONS_DOMAIN` y `ACME_EMAIL`, y añade `compose.caddy.yaml`. Esa variante ocupa 80/443, requiere que estén disponibles y gestiona certificados públicos automáticamente. No la uses en un servidor que ya tiene Traefik.
 
 ```bash
 docker compose --env-file deploy/sessions/.env \
   -f deploy/sessions/compose.yaml \
-  -f deploy/sessions/compose.caddy.yaml \
-  -f deploy/sessions/compose.build.yaml up -d --build
+  -f deploy/sessions/compose.caddy.yaml up -d
 ```
 
 ## Vincular la app: solo URL
@@ -89,7 +71,7 @@ El contenedor principal reserva como límites máximos 384 MiB y 0,5 CPU. El mig
 Copia consistente de SQLite, ejecutada desde `deploy/sessions` y con los mismos archivos Compose de tu despliegue:
 
 ```bash
-docker compose -f compose.yaml -f compose.traefik.yaml exec sessions \
+docker compose -f compose.yaml --env-file .env exec sessions \
   streamhive-sessions backup /data/backup-20261102.sqlite
 ```
 

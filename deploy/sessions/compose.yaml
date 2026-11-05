@@ -1,7 +1,14 @@
+# Servidor de sesiones remotas de StreamHive detrás de un Traefik existente.
+# Un solo archivo: cópialo al servidor junto a un .env (ver .env.example) y ejecuta
+#
+#   docker compose -f compose.yaml --env-file .env up -d
+#
+# Actualizar a otra versión: cambia SESSIONS_TAG en .env y repite `pull` + `up -d`.
 name: ${COMPOSE_PROJECT_NAME:-streamhive-sessions}
 
-x-image: &image
+x-sessions-image: &sessions-image
   image: ${SESSIONS_IMAGE:-johpaz/streamhive-sessions}:${SESSIONS_TAG:-0.1.0}
+
 x-hardening: &hardening
   user: "1000:1000"
   read_only: true
@@ -9,15 +16,21 @@ x-hardening: &hardening
   security_opt: ["no-new-privileges:true"]
   tmpfs: ["/tmp:size=64M,mode=1777"]
   pids_limit: 128
+
 x-env: &env
-  PUBLIC_URL: https://${SESSIONS_DOMAIN:?Set SESSIONS_DOMAIN in .env}
+  PUBLIC_URL: https://${SESSIONS_DOMAIN:?Pon SESSIONS_DOMAIN en .env}
   DATA_DIR: /data
   LISTEN_ADDR: 0.0.0.0:8080
-  RUST_LOG: streamhive_sessions=info
+  RUST_LOG: ${RUST_LOG:-streamhive_sessions=info}
+
+x-logging: &logging
+  logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 
 services:
+  # Crea o actualiza el esquema de SQLite antes de arrancar el servidor.
   sessions-migrate:
-    <<: [*image, *hardening]
+    <<: [*sessions-image, *hardening, *logging]
+    container_name: streamhive-sessions-migrate
     restart: "no"
     command: ["migrate"]
     environment: *env
@@ -26,10 +39,10 @@ services:
     mem_limit: 128m
     cpus: 0.5
     healthcheck: { disable: true }
-    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 
   sessions:
-    <<: [*image, *hardening]
+    <<: [*sessions-image, *hardening, *logging]
+    container_name: streamhive-sessions
     restart: unless-stopped
     stop_grace_period: 30s
     expose: ["8080"]
@@ -42,19 +55,34 @@ services:
       REQUESTS_PER_MINUTE: ${REQUESTS_PER_MINUTE:-600}
       MAX_CONNECTIONS: ${MAX_CONNECTIONS:-1000}
     volumes: ["sessions-data:/data"]
-    networks: [backend]
     depends_on:
       sessions-migrate: { condition: service_completed_successfully }
+    networks:
+      - backend
+      - traefik-proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=n8n_evoapi
+      - traefik.http.routers.streamhive-sessions.rule=Host(`${SESSIONS_DOMAIN}`)
+      - traefik.http.routers.streamhive-sessions.entrypoints=websecure
+      - traefik.http.routers.streamhive-sessions.tls=true
+      - traefik.http.routers.streamhive-sessions.tls.certresolver=mytlschallenge
+      - traefik.http.routers.streamhive-sessions.middlewares=streamhive-sessions-headers@docker
+      - traefik.http.middlewares.streamhive-sessions-headers.headers.SSLRedirect=true
+      - traefik.http.middlewares.streamhive-sessions-headers.headers.STSSeconds=315360000
+      - traefik.http.services.streamhive-sessions.loadbalancer.server.port=8080
     healthcheck:
       test: ["CMD", "streamhive-sessions", "healthcheck"]
       interval: 15s
       timeout: 5s
       start_period: 15s
       retries: 5
-    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 
 networks:
   backend:
-    internal: true
+  traefik-proxy:
+    external: true
+    name: n8n_evoapi
+
 volumes:
   sessions-data:

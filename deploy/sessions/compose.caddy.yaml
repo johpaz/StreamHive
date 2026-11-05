@@ -1,6 +1,6 @@
 services:
   sessions:
-    networks: [backend, edge]
+    networks: [edge]
   caddy:
     image: docker.io/library/caddy:2.10.2-alpine
     restart: unless-stopped
@@ -19,6 +19,9 @@ services:
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 networks:
   edge:
+  # Sin Traefik en el servidor: la red que compose.yaml espera como externa la crea este compose.
+  traefik-proxy:
+    external: false
 volumes:
   caddy-data:
   caddy-config:
