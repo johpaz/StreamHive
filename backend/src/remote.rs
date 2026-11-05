@@ -17,16 +17,28 @@ struct Saved {
     url: String,
     installation_id: String,
     sealed_credential: String,
+    /// El servidor tiene LiveKit (`/api/v1/meta` → `media: true`).
+    #[serde(default)]
+    media: bool,
+    /// Usar el servidor para cámara y audio cuando lo tiene (por defecto sí).
+    #[serde(default = "yes")]
+    use_media: bool,
+}
+fn yes() -> bool {
+    true
 }
 pub struct Remote {
     changes: watch::Sender<u64>,
     state: Mutex<Value>,
+    /// Permiso de administración de la sala en el servidor: (URL, token, sala, caducidad).
+    pub media_admin: Mutex<Option<(String, String, String, u64)>>,
 }
 impl Default for Remote {
     fn default() -> Self {
         Self {
             changes: watch::channel(0).0,
             state: Mutex::new(json!({"url":null,"status":"unconfigured","snapshot":null})),
+            media_admin: Mutex::new(None),
         }
     }
 }
@@ -41,6 +53,30 @@ fn saved(s: &App) -> Result<Option<Saved>, Error> {
 }
 fn credential(s: &App, c: &Saved) -> Result<String, Error> {
     unseal(&s.master, &c.sealed_credential).map_err(Error::from)
+}
+/// Servidor cuyo LiveKit usa el estudio para cámara y audio, si está en uso.
+pub fn media_target(s: &App) -> Option<(String, String)> {
+    let c = saved(s).ok().flatten().filter(|c| c.media && c.use_media)?;
+    let credential = credential(s, &c).ok()?;
+    Some((c.url, credential))
+}
+fn save(s: &App, c: &Saved) -> Result<(), Error> {
+    s.store.lock().unwrap().set(
+        SETTING,
+        &serde_json::to_string(c).map_err(|_| bad("No se pudo guardar"))?,
+    )?;
+    Ok(())
+}
+/// Recuerda si el servidor tiene medios; si cambia, la sala del estudio cambia de sitio.
+fn remember_media(s: &App, meta: &Value) -> Result<(), Error> {
+    let media = meta["media"] == true;
+    if let Some(mut c) = saved(s)? {
+        if c.media != media {
+            c.media = media;
+            save(s, &c)?;
+        }
+    }
+    Ok(())
 }
 fn changed(s: &App) {
     s.remote.changes.send_modify(|n| *n += 1);
@@ -157,14 +193,47 @@ pub async fn check(State(s): State<App>, h: HeaderMap, Json(b): Json<UrlBody>) -
 }
 pub async fn view(State(s): State<App>, h: HeaderMap) -> Reply {
     s.admin(&h)?;
-    Ok(Json(s.remote.state.lock().unwrap().clone()))
+    let mut v = s.remote.state.lock().unwrap().clone();
+    let c = saved(&s)?;
+    v["media"] = json!(c.as_ref().is_some_and(|c| c.media));
+    v["use_media"] = json!(c.as_ref().is_none_or(|c| c.use_media));
+    v["media_active"] = json!(media_target(&s).is_some());
+    Ok(Json(v))
+}
+#[derive(Deserialize)]
+pub struct MediaBody {
+    enabled: bool,
+}
+/// Cámara y audio por el servidor o por este equipo. No se cambia en pleno directo.
+pub async fn set_media(State(s): State<App>, h: HeaderMap, Json(b): Json<MediaBody>) -> Reply {
+    s.admin(&h)?;
+    let _guard = s.operations.lock().await;
+    if s.data.lock().await.active().is_some() {
+        return Err(bad(
+            "Termina el directo o la grabación antes de cambiar dónde va la cámara y el audio",
+        ));
+    }
+    let mut c = configured(&s).await?;
+    c.use_media = b.enabled;
+    save(&s, &c)?;
+    *s.remote.media_admin.lock().unwrap() = None;
+    sync_guests(&s).await;
+    changed(&s);
+    Ok(Json(
+        json!({"ok":true,"media_active":media_target(&s).is_some()}),
+    ))
 }
 pub async fn configure(State(s): State<App>, h: HeaderMap, Json(b): Json<UrlBody>) -> Reply {
     s.admin(&h)?;
     let _guard = s.operations.lock().await;
     let url = normalize(&b.url)?;
-    verify(&url).await?;
+    let meta = verify(&url).await?;
     let previous = saved(&s)?;
+    if previous.as_ref().is_none_or(|c| c.url != url) && s.data.lock().await.active().is_some() {
+        return Err(bad(
+            "Termina el directo o la grabación antes de cambiar de servidor",
+        ));
+    }
     if previous.as_ref().is_some_and(|c| c.url != url)
         && s.remote.state.lock().unwrap()["snapshot"]["session"].is_object()
     {
@@ -212,12 +281,16 @@ pub async fn configure(State(s): State<App>, h: HeaderMap, Json(b): Json<UrlBody
             url: url.clone(),
             installation_id: id.into(),
             sealed_credential: seal(&s.master, key)?,
+            media: false,
+            use_media: true,
         }
     };
-    s.store.lock().unwrap().set(
-        SETTING,
-        &serde_json::to_string(&c).map_err(|_| bad("No se pudo guardar"))?,
-    )?;
+    let c = Saved {
+        media: meta["media"] == true,
+        ..c
+    };
+    save(&s, &c)?;
+    *s.remote.media_admin.lock().unwrap() = None;
     update(&s, Some(&url), "connecting", None, None);
     changed(&s);
     Ok(Json(json!({"ok":true})))
@@ -225,6 +298,11 @@ pub async fn configure(State(s): State<App>, h: HeaderMap, Json(b): Json<UrlBody
 pub async fn disconnect(State(s): State<App>, h: HeaderMap) -> Reply {
     s.admin(&h)?;
     let _guard = s.operations.lock().await;
+    if media_target(&s).is_some() && s.data.lock().await.active().is_some() {
+        return Err(bad(
+            "Termina el directo o la grabación antes de desconectar el servidor: la cámara y el audio van por él",
+        ));
+    }
     if let Some(c) = saved(&s)? {
         let sid = s.remote.state.lock().unwrap()["snapshot"]["session"]["id"]
             .as_str()
@@ -241,7 +319,9 @@ pub async fn disconnect(State(s): State<App>, h: HeaderMap) -> Reply {
         }
     }
     s.store.lock().unwrap().set(SETTING, "")?;
+    *s.remote.media_admin.lock().unwrap() = None;
     update(&s, None, "unconfigured", None, None);
+    sync_guests(&s).await;
     changed(&s);
     Ok(Json(json!({"ok":true})))
 }
@@ -298,6 +378,7 @@ pub async fn close(State(s): State<App>, h: HeaderMap) -> Reply {
     )
     .await?;
     update(&s, Some(&c.url), "connecting", None, None);
+    sync_guests(&s).await;
     changed(&s);
     Ok(Json(r))
 }
@@ -345,6 +426,75 @@ pub async fn revoke(State(s): State<App>, h: HeaderMap, Path(iid): Path<String>)
     .await
     .map(Json)
 }
+/// Marca de los participantes del estudio que son invitados del servidor (`g-<id>`).
+pub const REMOTE_INVITE: &str = "remote";
+/// Invitados admitidos en el servidor = participantes del estudio, para verlos en Fuentes →
+/// Personas y llevarlos al programa. Solo cuando la cámara y el audio van por el servidor.
+pub async fn sync_guests(s: &App) {
+    let admitted: Vec<(String, String)> = if media_target(s).is_some() {
+        s.remote.state.lock().unwrap()["snapshot"]["participants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["status"] == "admitted")
+            .filter_map(|p| {
+                Some((
+                    format!("g-{}", p["id"].as_str()?),
+                    p["name"].as_str()?.to_owned(),
+                ))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut d = s.data.lock().await;
+    let mut changed = false;
+    for (id, name) in &admitted {
+        if !d.participants.contains_key(id) {
+            d.participants.insert(
+                id.clone(),
+                crate::model::Participant {
+                    id: id.clone(),
+                    name: name.clone(),
+                    status: "admitted".into(),
+                    invite: REMOTE_INVITE.into(),
+                    created: crate::now(),
+                    connected: false,
+                },
+            );
+            changed = true;
+        }
+    }
+    let gone: Vec<String> = d
+        .participants
+        .values()
+        .filter(|p| p.invite == REMOTE_INVITE && !admitted.iter().any(|(id, _)| id == &p.id))
+        .map(|p| p.id.clone())
+        .collect();
+    for id in gone {
+        d.participants.remove(&id);
+        d.remove_from_program(&id);
+        changed = true;
+    }
+    if changed {
+        let _ = s.persist(&mut d);
+    }
+}
+/// Retira en el servidor a un invitado remoto desde el estudio (`g-<id>`).
+pub async fn remove_guest(s: &App, identity: &str) -> Result<(), Error> {
+    let pid = identity.strip_prefix("g-").ok_or_else(denied)?;
+    let c = configured(s).await?;
+    let sid = current_id(s)?;
+    request(
+        &c.url,
+        Some(credential(s, &c)?),
+        reqwest::Method::POST,
+        &format!("/sessions/{sid}/participants/{pid}"),
+        Some(json!({"action":"remove"})),
+    )
+    .await?;
+    Ok(())
+}
 pub fn start(s: App) {
     tokio::spawn(async move {
         let mut changes = s.remote.changes.subscribe();
@@ -354,7 +504,8 @@ pub fn start(s: App) {
                 let mut delay = 1u64;
                 loop {
                     let attempt = async {
-                        verify(&c.url).await?;
+                        let meta = verify(&c.url).await?;
+                        remember_media(&s, &meta)?;
                         let snapshot = request(
                             &c.url,
                             Some(credential(&s, &c)?),
@@ -365,6 +516,7 @@ pub fn start(s: App) {
                         .await?;
                         let sid = snapshot["session"]["id"].as_str().map(str::to_owned);
                         update(&s, Some(&c.url), "connected", Some(snapshot), None);
+                        sync_guests(&s).await;
                         let Some(sid) = sid else {
                             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                             return Ok::<(), Error>(());
@@ -416,6 +568,7 @@ pub fn start(s: App) {
                                             if closed { None } else { Some(snapshot) },
                                             None,
                                         );
+                                        sync_guests(&s).await;
                                         if closed {
                                             return Ok(());
                                         }

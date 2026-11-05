@@ -7,6 +7,7 @@ mod model;
 mod monitor;
 mod output;
 mod remote;
+mod rtc;
 mod security;
 mod store;
 mod tls;
@@ -451,6 +452,12 @@ async fn studio(State(s): State<App>, h: HeaderMap) -> Reply {
         b.remove("renderer_hash");
     }
     v["independent_services"] = json!(s.engine.independent_services());
+    // "device": el enlace local solo abre en este equipo (localhost); "network": vale en la LAN o en internet.
+    v["invite_scope"] = json!(if invite_origin_is_loopback(&s.invite_origin) {
+        "device"
+    } else {
+        "network"
+    });
     Ok(Json(v))
 }
 async fn status(State(s): State<App>, h: HeaderMap) -> Reply {
@@ -460,13 +467,20 @@ async fn status(State(s): State<App>, h: HeaderMap) -> Reply {
     let bytes = fs2::available_space(&dir)
         .or_else(|_| fs2::available_space(&s.recordings))
         .map_err(|e| Error::from(anyhow::Error::new(e)))?;
-    let lk =
-        s.lk.rpc("RoomService", "ListRooms", json!({"names":[ROOM]}))
-            .await
-            .is_ok();
+    let lk = rtc::healthy(&s).await;
     Ok(Json(
         json!({"free_bytes":bytes,"disk_warning":bytes<s.required_space(),"livekit":lk,"database":true}),
     ))
+}
+fn invite_origin_is_loopback(origin: &str) -> bool {
+    url::Url::parse(origin)
+        .ok()
+        .is_some_and(|u| match u.host() {
+            Some(url::Host::Domain(d)) => d == "localhost" || d.ends_with(".localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => true,
+        })
 }
 async fn invite(State(s): State<App>, h: HeaderMap) -> Reply {
     s.admin(&h)?;
@@ -554,22 +568,22 @@ async fn join(State(s): State<App>, Json(body): Json<Join>) -> Result<Response, 
 }
 async fn token(State(s): State<App>, h: HeaderMap) -> Reply {
     let c = s.participant(&h).await?;
-    let d = s.data.lock().await;
-    let name = if c.role == "admin" {
-        "Anfitrión"
-    } else {
-        let p = d.participants.get(&c.sub).ok_or_else(denied)?;
-        if p.status != "admitted" {
-            return Err(Error(
-                StatusCode::FORBIDDEN,
-                "Espera a que te admita el anfitrión".into(),
-            ));
+    let name = {
+        let d = s.data.lock().await;
+        if c.role == "admin" {
+            "Anfitrión".to_owned()
+        } else {
+            let p = d.participants.get(&c.sub).ok_or_else(denied)?;
+            if p.status != "admitted" {
+                return Err(Error(
+                    StatusCode::FORBIDDEN,
+                    "Espera a que te admita el anfitrión".into(),
+                ));
+            }
+            p.name.clone()
         }
-        &p.name
     };
-    Ok(Json(
-        json!({"token":s.lk.join_token(&c.sub,name),"url":s.livekit_url(&h)}),
-    ))
+    Ok(Json(rtc::join(&s, &h, &c.sub, &name).await?))
 }
 #[derive(Deserialize)]
 struct Action {
@@ -586,29 +600,48 @@ async fn participant_action(
     if !["admit", "wait", "remove", "mute"].contains(&body.action.as_str()) {
         return Err(bad("Acción desconocida"));
     }
-    {
+    let remote_guest = {
         let d = s.data.lock().await;
         if !d.participants.contains_key(&identity) && !(identity == "host" && body.action == "mute")
         {
             return Err(bad("Participante inexistente"));
         }
+        d.participants
+            .get(&identity)
+            .is_some_and(|p| p.invite == remote::REMOTE_INVITE)
+    };
+    // Invitados del servidor: la admisión se decide en el servidor; retirarlos, también.
+    if remote_guest && body.action != "mute" {
+        if body.action != "remove" {
+            return Err(bad(
+                "Este invitado entró por el servidor de sesiones: gestiónalo en Invitados del servidor",
+            ));
+        }
+        remote::remove_guest(&s, &identity).await?;
+        {
+            let mut d = s.data.lock().await;
+            d.participants.remove(&identity);
+            d.remove_from_program(&identity);
+            s.persist(&mut d)?;
+        }
+        let _ = rtc::remove(&s, &identity).await;
+        return Ok(Json(json!({"ok":true})));
     }
     if body.action == "mute" {
-        let info =
-            s.lk.rpc(
-                "RoomService",
-                "GetParticipant",
-                json!({"room":ROOM,"identity":identity}),
-            )
-            .await?;
+        let info = rtc::rpc(
+            &s,
+            "GetParticipant",
+            json!({"room":ROOM,"identity":identity}),
+        )
+        .await?;
         for track in info["tracks"]
             .as_array()
             .into_iter()
             .flatten()
             .filter(|t| t["source"] == "MICROPHONE" || t["source"] == 2)
         {
-            s.lk.rpc(
-                "RoomService",
+            rtc::rpc(
+                &s,
                 "MutePublishedTrack",
                 json!({"room":ROOM,"identity":identity,"track_sid":track["sid"],"muted":true}),
             )
@@ -664,7 +697,7 @@ async fn participant_action(
             s.persist(&mut d)?;
         }
         if was_admitted && body.action != "admit" {
-            s.lk.remove(&identity).await?;
+            rtc::remove(&s, &identity).await?;
         }
     }
     Ok(Json(json!({"ok":true})))
@@ -1654,9 +1687,7 @@ struct Ack {
 /// Credenciales de LiveKit para el compositor local (el de Egress las recibe de Egress).
 async fn render_session(State(s): State<App>, h: HeaderMap, Query(q): Query<RenderQuery>) -> Reply {
     s.render_access(&q.render_token).await?;
-    Ok(Json(
-        json!({"url":s.livekit_url(&h),"token":s.lk.recorder_token_for(q.format)}),
-    ))
+    Ok(Json(rtc::recorder(&s, &h, q.format).await?))
 }
 /// El shell de escritorio pregunta qué ventana de compositor debe abrir (None = ninguna).
 async fn desktop_renderer(State(s): State<App>, h: HeaderMap) -> Reply {
@@ -2298,9 +2329,7 @@ async fn reconcile(s: &App) -> anyhow::Result<()> {
             }
         }
     }
-    let response =
-        s.lk.rpc("RoomService", "ListParticipants", json!({"room":ROOM}))
-            .await;
+    let response = rtc::rpc(s, "ListParticipants", json!({"room":ROOM})).await;
     if let Ok(response) = response {
         let mut d = s.data.lock().await;
         let mut changed = false;
@@ -2369,7 +2398,7 @@ async fn reconcile(s: &App) -> anyhow::Result<()> {
         }
         drop(d);
         for identity in unauthorized {
-            let _ = s.lk.remove(&identity).await;
+            let _ = rtc::remove(s, &identity).await;
         }
     }
     Ok(())
@@ -2412,6 +2441,10 @@ fn router(s: App) -> Router {
                 .delete(remote::disconnect),
         )
         .route("/api/v1/remote-server/check", post(remote::check))
+        .route(
+            "/api/v1/remote-server/media",
+            axum::routing::put(remote::set_media),
+        )
         .route(
             "/api/v1/remote-session",
             post(remote::create).delete(remote::close),
@@ -2706,6 +2739,24 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_invitations_on_localhost_only_open_on_this_device() {
+        for o in [
+            "http://localhost:5173",
+            "http://127.0.0.1:8080",
+            "http://[::1]:80",
+            "http://app.localhost",
+        ] {
+            assert!(invite_origin_is_loopback(o), "{o}");
+        }
+        for o in [
+            "https://192.168.1.20:8443",
+            "https://estudio.example.com",
+            "http://10.0.0.5",
+        ] {
+            assert!(!invite_origin_is_loopback(o), "{o}");
+        }
+    }
     #[test]
     fn rtmp_validation() {
         assert!(destination_url("https://example.org", "key").is_err());

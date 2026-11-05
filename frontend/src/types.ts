@@ -95,6 +95,8 @@ export interface Profile {
   title: string;
 }
 export interface Studio {
+  /** "device": la invitación local solo abre en este equipo. */
+  invite_scope?: "device" | "network";
   profile?: Profile | null;
   program: Program;
   portrait_program?: Program;

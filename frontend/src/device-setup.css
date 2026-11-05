@@ -1,0 +1,138 @@
+/* Prueba de cámara y micrófono (DeviceSetup): en la app y en el portal de invitados del servidor. */
+.device-setup {
+  margin: 18px 0 26px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+  text-align: left;
+}
+.device-setup-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.device-setup-heading small {
+  font-size: 10px;
+}
+.device-setup-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+.device-camera {
+  position: relative;
+  aspect-ratio: 16/9;
+  background: #0c131a;
+  border: 1px solid #2d3945;
+  border-radius: 7px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  color: #a4b4a5;
+}
+.device-camera > span {
+  font-size: 35px;
+  text-align: center;
+}
+.device-camera video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform: scaleX(-1);
+}
+/* Detalle al 100 %: un píxel de la cámara = un píxel de pantalla, para juzgar la nitidez real. */
+.device-camera.is-detail video {
+  object-fit: none;
+}
+.device-camera .res-badge {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #0009;
+  color: #fff;
+  font: 600 12px/1.4 inherit;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.device-camera video[hidden] {
+  display: none;
+}
+.device-inputs label {
+  margin: 0 0 12px;
+  font-size: 11px;
+}
+.device-inputs select {
+  padding: 8px;
+  font-size: 11px;
+}
+.mic-status {
+  font-size: 10px;
+  color: #97a58e;
+  margin: 10px 0 6px;
+}
+.mic-meter {
+  height: 8px;
+  background: #29352a;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.mic-meter span {
+  height: 100%;
+  background: var(--accent);
+  display: block;
+  transition: width 0.08s;
+}
+.device-flags {
+  display: flex;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.device-flags label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+}
+.device-flags input {
+  margin: 0;
+  width: 15px;
+  height: 15px;
+}
+.device-setup-actions {
+  display: flex;
+  gap: 12px;
+  margin: 16px 0 12px;
+  flex-wrap: wrap;
+}
+.device-error {
+  font-size: 11px;
+  color: #ffadb9;
+  line-height: 1.5;
+}
+.device-setup > small {
+  font-size: 10px;
+}
+@media (max-width: 600px) {
+  .device-setup-grid {
+    grid-template-columns: 1fr;
+  }
+  .device-camera {
+    aspect-ratio: 16/9;
+  }
+  .device-setup-heading {
+    align-items: start;
+  }
+  .device-setup-actions .button {
+    font-size: 10px;
+  }
+}
+.device-quality-info { display: block; opacity: 0.75; margin: -4px 0 6px; font-size: 12px; }

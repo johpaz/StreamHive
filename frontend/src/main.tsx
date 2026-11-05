@@ -5,6 +5,7 @@ import { DesktopRenderer, desktopEnter, isDesktop } from "./desktop";
 import { ProfileSettings, Welcome, initials } from "./Account";
 import { audioMode, loadAudioMode } from "./audio-quality";
 import { RemoteSessions } from "./RemoteSessions";
+import { InviteBanner, type Invite } from "./InviteBanner";
 import { Scenes } from "./Scenes";
 import { Slates } from "./Slates";
 import { useFocusMode, useStoredFlag } from "./useFocusMode";
@@ -47,8 +48,7 @@ function App() {
   const [format, setFormat] = useState<OutputFormat>("landscape");
   const [health, setHealth] = useState<Health | null>(null);
   const [records, setRecords] = useState<Recording[]>([]);
-  const [invite, setInvite] = useState("");
-  const [inviteCa, setInviteCa] = useState("");
+  const [invite, setInvite] = useState<Invite | null>(null);
   const [invites, setInvites] = useState<
     { id: string; expires: number; revoked: boolean }[]
   >([]);
@@ -244,14 +244,47 @@ function App() {
     ),
   );
   const focused = admin && tab === "studio" && focusMode.focus && Boolean(studio);
+  const openSessionServer = () => {
+    setInvite(null);
+    setTab("settings");
+    setTimeout(
+      () =>
+        document
+          .getElementById("servidor-sesiones")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" }),
+      50,
+    );
+  };
+  // Con servidor de sesiones, la invitación sale con su dominio. Sin él, el enlace local
+  // solo sirve si la app es accesible desde fuera (LAN o dirección pública).
   const createInvite = () =>
     run(async () => {
+      const remote = await api<{
+        url: string | null;
+        status: string;
+        media_active?: boolean;
+        snapshot?: { session?: { id: string } } | null;
+      }>("/remote-server");
+      if (remote.url) {
+        if (remote.status !== "connected")
+          throw Error(
+            "El servidor de sesiones no está conectado. Revísalo en Configuración → Servidor de sesiones.",
+          );
+        if (!remote.snapshot?.session) await api("/remote-session", "POST");
+        const i = await api<{ url: string }>("/remote-session/invitations", "POST");
+        setInvite({ kind: "vps", url: i.url, media: remote.media_active });
+        return;
+      }
+      const scope = studio?.invite_scope ?? "network";
+      if (scope === "device" && desktopApp) {
+        setInvite({ kind: "help" });
+        return;
+      }
       const i = await api<{ url: string; ca_url?: string | null }>(
         "/invitations",
         "POST",
       );
-      setInvite(i.url);
-      setInviteCa(i.ca_url || "");
+      setInvite({ kind: scope, url: i.url, ca: i.ca_url || undefined });
     });
   return (
     <div className={`app-shell ${sidebarClosed ? "sidebar-collapsed" : ""} ${focused ? "focus-mode" : ""}`}>
@@ -374,7 +407,7 @@ function App() {
                 disabled={pending}
                 onClick={createInvite}
               >
-                ＋ Invitar personas (local)
+                ＋ Invitar personas
               </button>
             )}
           </div>
@@ -426,55 +459,16 @@ function App() {
             </div>
           )}
           {invite && (
-            <div className="invite-banner">
-              <div>
-                <b>Invita a tu próxima conversación</b>
-                <p>
-                  El enlace caduca en 24 horas. Abre el enlace en otro navegador
-                  para probarlo.
-                </p>
-                {inviteCa && (
-                  <p>
-                    Red local con HTTPS propio: cada invitado debe instalar
-                    una vez el{" "}
-                    <a href={inviteCa} target="_blank" rel="noreferrer">
-                      certificado de StreamHive
-                    </a>{" "}
-                    para poder usar cámara y micrófono.
-                  </p>
-                )}
-                <input
-                  aria-label="Enlace de invitación"
-                  readOnly
-                  value={invite}
-                />
-              </div>
-              <button
-                className="button"
-                onClick={() =>
-                  run(async () => {
-                    await navigator.clipboard.writeText(invite);
-                  }, "Enlace copiado")
-                }
-              >
-                Copiar enlace
-              </button>
-              <button
-                className="icon-button"
-                aria-label="Cerrar invitación"
-                onClick={() => {
-                  setInvite("");
-                  setInviteCa("");
-                }}
-              >
-                ×
-              </button>
-            </div>
+            <InviteBanner
+              invite={invite}
+              onClose={() => setInvite(null)}
+              onSettings={openSessionServer}
+            />
           )}
           {tab === "studio" &&
             (studio ? (
               <>
-              {admin && !focused && <RemoteSessions version={studio} pending={pending} run={run} settings={false} onInvite={(url)=>{setInvite(url);setInviteCa("");}} />}
+              {admin && !focused && <RemoteSessions version={studio} pending={pending} run={run} settings={false} onInvite={(url,media)=>setInvite({kind:"vps",url,media})} />}
               {admin && !focused && <Scenes studio={studio} format={format} onFormat={setFormat} run={run} pending={pending} names={names} />}
               <StudioWorkspace
                 key={format}
@@ -567,7 +561,7 @@ function App() {
           {tab === "settings" && admin && (
             <div className="settings-grid">
               <ProfileSettings profile={profile} onSaved={() => void refresh()} />
-              <RemoteSessions version={studio} pending={pending} run={run} settings onInvite={(url)=>{setInvite(url);setInviteCa("");}} />
+              <RemoteSessions version={studio} pending={pending} run={run} settings onInvite={(url,media)=>setInvite({kind:"vps",url,media})} />
               {studio && <Slates studio={studio} run={run} pending={pending} />}
               <section className="panel">
                 <h2>Destinos de transmisión</h2>

@@ -8,7 +8,7 @@
   "paths": {
     "/api/v1/meta": {
       "get": {
-        "summary": "Service identity, protocol=1 and media=false",
+        "summary": "Service identity, protocol=1; media=true with media_ports {udp,tcp} and media_ready when LiveKit is part of the deployment",
         "responses": {
           "200": {
             "description": "Success"
@@ -874,6 +874,108 @@
           },
           "404": {
             "description": "Unknown, unsent or deleted file"
+          }
+        }
+      }
+    },
+    "/api/v1/media/token": {
+      "post": {
+        "summary": "LiveKit permission for the installation own room (sh-<installation_id>). Body {role: publisher|recorder|admin, identity, name}. publisher: join and publish camera/microphone/screen; recorder: hidden subscriber, identity EG_*; admin: roomAdmin of that room only. Identities g-* are reserved for server guests. Returns {token,url,room,expires}. 501 without media",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "installation": []
+          }
+        ]
+      }
+    },
+    "/api/v1/guest/media": {
+      "get": {
+        "summary": "LiveKit permission for the admitted guest only (identity g-<participant_id>); 403 while waiting; 501 without media. Returns {token,url}",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Credential missing, invalid, expired or revoked"
+          },
+          "403": {
+            "description": "Browser origin mismatch"
+          },
+          "404": {
+            "description": "Resource absent or owned by another installation"
+          },
+          "409": {
+            "description": "Protocol conflict"
+          },
+          "410": {
+            "description": "Invitation expired or revoked"
+          },
+          "429": {
+            "description": "Configured rate or capacity limit"
+          }
+        },
+        "security": [
+          {
+            "guest": []
+          }
+        ]
+      }
+    },
+    "/lk/{path}": {
+      "get": {
+        "summary": "LiveKit signaling (WebSocket rtc, rtc/validate) proxied to the internal LiveKit; media goes to the published UDP/TCP ports",
+        "responses": {
+          "101": {
+            "description": "WebSocket"
+          },
+          "404": {
+            "description": "Path not allowed"
+          },
+          "501": {
+            "description": "No media"
+          }
+        }
+      },
+      "post": {
+        "summary": "LiveKit RoomService twirp for the own room only: ListParticipants, GetParticipant, MutePublishedTrack, RemoveParticipant; LiveKit enforces the room in the token",
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Token missing or for another room"
+          },
+          "404": {
+            "description": "Method not allowed"
           }
         }
       }

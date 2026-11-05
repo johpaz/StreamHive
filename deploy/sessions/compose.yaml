@@ -4,6 +4,9 @@
 #   docker compose -f compose.yaml --env-file .env up -d
 #
 # Actualizar a otra versión: cambia SESSIONS_TAG en .env y repite `pull` + `up -d`.
+#
+# Además de HTTPS (Traefik), abre en el firewall del VPS los puertos de cámara y audio:
+# ${MEDIA_UDP_PORT:-7882}/udp y ${MEDIA_TCP_PORT:-7881}/tcp. No pasan por Traefik (WebRTC).
 name: ${COMPOSE_PROJECT_NAME:-streamhive-sessions}
 
 x-sessions-image: &sessions-image
@@ -22,19 +25,27 @@ x-env: &env
   DATA_DIR: /data
   LISTEN_ADDR: 0.0.0.0:8080
   RUST_LOG: ${RUST_LOG:-streamhive_sessions=info}
+  # Cámara y audio: LiveKit de este compose, solo accesible a través de este servicio (/lk).
+  LIVEKIT_URL: http://livekit:7880
+  MEDIA_DIR: /media
+  MEDIA_UDP_PORT: ${MEDIA_UDP_PORT:-7882}
+  MEDIA_TCP_PORT: ${MEDIA_TCP_PORT:-7881}
+  # Vacío: LiveKit descubre la IP pública del VPS. Ponla si el VPS tiene varias.
+  MEDIA_PUBLIC_IP: ${MEDIA_PUBLIC_IP:-}
 
 x-logging: &logging
   logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 
 services:
-  # Crea o actualiza el esquema de SQLite antes de arrancar el servidor.
+  # Crea o actualiza el esquema de SQLite y prepara LiveKit (claves propias la primera vez)
+  # antes de arrancar el servidor.
   sessions-migrate:
     <<: [*sessions-image, *hardening, *logging]
     container_name: streamhive-sessions-migrate
     restart: "no"
     command: ["migrate"]
     environment: *env
-    volumes: ["sessions-data:/data"]
+    volumes: ["sessions-data:/data", "media-config:/media"]
     networks: [backend]
     mem_limit: 128m
     cpus: 0.5
@@ -54,7 +65,7 @@ services:
       REGISTRATIONS_PER_HOUR: ${REGISTRATIONS_PER_HOUR:-120}
       REQUESTS_PER_MINUTE: ${REQUESTS_PER_MINUTE:-600}
       MAX_CONNECTIONS: ${MAX_CONNECTIONS:-1000}
-    volumes: ["sessions-data:/data"]
+    volumes: ["sessions-data:/data", "media-config:/media:ro"]
     depends_on:
       sessions-migrate: { condition: service_completed_successfully }
     networks:
@@ -78,6 +89,31 @@ services:
       start_period: 15s
       retries: 5
 
+  # Cámara y audio de anfitriones e invitados. Señalización por el servicio de sesiones;
+  # el vídeo, directo a los puertos publicados (UDP, o TCP si la red del invitado bloquea UDP).
+  livekit:
+    image: docker.io/livekit/livekit-server:v1.13.11@sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20
+    container_name: streamhive-livekit
+    <<: [*hardening, *logging]
+    pids_limit: 512
+    restart: unless-stopped
+    command: ["--config", "/media/livekit.yaml"]
+    volumes: ["media-config:/media:ro"]
+    ports:
+      - "${MEDIA_UDP_PORT:-7882}:${MEDIA_UDP_PORT:-7882}/udp"
+      - "${MEDIA_TCP_PORT:-7881}:${MEDIA_TCP_PORT:-7881}/tcp"
+    mem_limit: ${MEDIA_MEMORY_LIMIT:-1g}
+    cpus: ${MEDIA_CPU_LIMIT:-1.5}
+    networks: [backend]
+    depends_on:
+      sessions-migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7880/"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+
 networks:
   backend:
   traefik-proxy:
@@ -86,3 +122,4 @@ networks:
 
 volumes:
   sessions-data:
+  media-config:

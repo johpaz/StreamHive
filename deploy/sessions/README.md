@@ -1,6 +1,16 @@
 # StreamHive Sessions en tu VPS
 
-Servicio de **sesiones y admisión**, independiente de Hive Cloud. No incluye LiveKit, TURN, cámara/audio, grabación ni salidas RTMP. Cada app conserva el estudio y las grabaciones en su PC.
+Tu propio servidor para invitar a gente de fuera de tu red: **sala de espera, admisión, chat y cámara/audio** de los invitados. La app de escritorio solo necesita su URL HTTPS; las claves (de la app y de LiveKit) se crean solas. La emisión RTMP y las grabaciones siguen en el PC de cada estudio.
+
+Requisitos:
+
+1. Un VPS con Docker y un dominio o subdominio que apunte a él.
+2. HTTPS en ese dominio: tu Traefik (abajo) o la variante con Caddy.
+3. **Dos puertos abiertos en el firewall del VPS** para cámara y audio: `7882/udp` y `7881/tcp`. El vídeo (WebRTC) no puede pasar por el proxy HTTPS; va directo a esos puertos. Si la red de un invitado bloquea UDP, usa el TCP automáticamente.
+
+Por ejemplo, con `ufw`: `sudo ufw allow 7882/udp && sudo ufw allow 7881/tcp`. En proveedores con firewall propio (Hetzner, AWS, Oracle…), ábrelos también en su panel.
+
+Cuánto aguanta: cada cámara son unos 2–3 Mbps de subida al VPS y otros tantos de bajada hacia cada participante que la ve. Con 2 vCPU y 2 GB, unas 4–6 personas a 720p.
 
 ## Con tu Traefik
 
@@ -18,7 +28,9 @@ docker compose -f compose.yaml --env-file .env pull
 docker compose -f compose.yaml --env-file .env up -d
 ```
 
-El job `sessions-migrate` prepara el volumen antes de arrancar el servicio. Comprueba `/healthz`, `/readyz` y `/api/v1/meta` sobre HTTPS. No incluyas una ruta adicional en la URL configurada en la app. Para cambiar de versión, edita `SESSIONS_TAG` en `.env` y repite ambos comandos.
+Si tu Traefik usa otra red, entrypoint o resolver, cambia esos valores en las etiquetas de `compose.yaml`.
+
+El job `sessions-migrate` prepara la base de datos y, la primera vez, las claves de LiveKit (en el volumen `media-config`, que no sale del servidor). LiveKit no es accesible desde fuera salvo por `https://tu.dominio/lk` y los puertos de vídeo; `/api/v1/meta` indica `"media": true`, los puertos y si LiveKit responde (`media_ready`). Comprueba `/healthz`, `/readyz` y `/api/v1/meta` sobre HTTPS. No incluyas una ruta adicional en la URL configurada en la app. Para cambiar de versión, edita `SESSIONS_TAG` en `.env` y repite ambos comandos.
 
 Para construir la imagen desde este repositorio sin esperar a Docker Hub, desde la raíz:
 

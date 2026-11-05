@@ -57,15 +57,6 @@ impl LiveKit {
             json!({"roomJoin":true,"room":ROOM,"canPublish":false,"canPublishData":false,"canSubscribe":true,"hidden":true}),
         )
     }
-    pub async fn remove(&self, identity: &str) -> anyhow::Result<()> {
-        self.rpc(
-            "RoomService",
-            "RemoveParticipant",
-            json!({"room":ROOM,"identity":identity}),
-        )
-        .await?;
-        Ok(())
-    }
 }
 /// Solo incluye las salidas de los servicios activos: sin archivo no se graba y sin URL no se emite.
 pub fn egress_request(path: Option<&str>, template: &str, destinations: &[String]) -> Value {

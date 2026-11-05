@@ -1,6 +1,7 @@
 mod chat;
 #[path = "../../backend/src/chat_store.rs"]
 mod chat_store;
+pub mod media;
 use axum::{
     Json, Router,
     body::Body,
@@ -8,7 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{any, delete, get, post},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::{SinkExt, StreamExt, stream::FusedStream};
@@ -61,6 +62,8 @@ pub struct Config {
     pub requests_per_minute: u32,
     pub max_connections: usize,
     pub trust_proxy: bool,
+    /// LiveKit del compose. Sin él, el servidor solo gestiona la espera, la admisión y el chat.
+    pub media: Option<media::Media>,
 }
 impl Config {
     pub fn new(public_url: &str, database: PathBuf) -> anyhow::Result<Self> {
@@ -87,6 +90,7 @@ impl Config {
             requests_per_minute: 600,
             max_connections: 1000,
             trust_proxy: false,
+            media: None,
         })
     }
 }
@@ -126,6 +130,7 @@ pub struct App {
     limits: Arc<Mutex<HashMap<String, (i64, u32)>>>,
     pub connections: Arc<AtomicUsize>,
     shutdown: watch::Sender<bool>,
+    media: Option<media::Media>,
 }
 impl App {
     pub fn open(config: Config) -> anyhow::Result<Self> {
@@ -154,6 +159,7 @@ impl App {
         let (shutdown, _) = watch::channel(false);
         Ok(Self {
             db: Arc::new(Mutex::new(c)),
+            media: config.media.clone(),
             config,
             rooms: Default::default(),
             chat_bus: Default::default(),
@@ -290,7 +296,12 @@ async fn guest(s: &App, h: &HeaderMap) -> Result<(String, String)> {
     s.db(move |c| c.query_row("SELECT p.session_id,p.id FROM participants p JOIN sessions s ON s.id=p.session_id JOIN invitations i ON i.id=p.invitation_id WHERE p.credential_hash=?1 AND p.status NOT IN ('removed','rejected') AND s.closed=0 AND s.expires>?2 AND i.revoked=0 AND i.expires>?2",params![key,now()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or_else(denied)).await
 }
 async fn guard(State(s): State<App>, req: Request, next: Next) -> Result<Response> {
-    if let Some(origin) = req.headers().get(header::ORIGIN) {
+    // /lk lo usa también la app de escritorio desde su propio origen; ahí autoriza el permiso de LiveKit.
+    if let Some(origin) = req
+        .headers()
+        .get(header::ORIGIN)
+        .filter(|_| !req.uri().path().starts_with("/lk/"))
+    {
         if origin.to_str().ok() != Some(&s.config.public_url) {
             return Err(Error(StatusCode::FORBIDDEN, "Origen no permitido"));
         }
@@ -339,10 +350,13 @@ async fn guard(State(s): State<App>, req: Request, next: Next) -> Result<Respons
     r.headers_mut().insert(header::CONTENT_SECURITY_POLICY,"default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'".parse().unwrap());
     Ok(r)
 }
-async fn meta() -> Json<Value> {
-    Json(
-        json!({"service":"streamhive-sessions","protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION"),"media":false}),
-    )
+async fn meta(State(s): State<App>) -> Json<Value> {
+    let mut v = json!({"service":"streamhive-sessions","protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION"),"media":s.media.is_some()});
+    if let Some(m) = &s.media {
+        v["media_ports"] = json!({"udp":m.ports.udp,"tcp":m.ports.tcp});
+        v["media_ready"] = json!(m.ready().await);
+    }
+    Json(v)
 }
 async fn health() -> Json<Value> {
     Json(json!({"ok":true}))
@@ -428,12 +442,15 @@ async fn close_session(
     Path(sid): Path<String>,
 ) -> Result<Json<Value>> {
     let oid = owner(&s, &h).await?;
-    let key = sid.clone();
+    let (key, owner_id) = (sid.clone(), oid.clone());
     s.db(move |c| { // Closing twice is safe, including after a lost response.
-        let count=c.execute("UPDATE sessions SET closed=1,revision=revision+CASE WHEN closed=0 THEN 1 ELSE 0 END WHERE id=?1 AND installation_id=?2",params![key,oid])?;
+        let count=c.execute("UPDATE sessions SET closed=1,revision=revision+CASE WHEN closed=0 THEN 1 ELSE 0 END WHERE id=?1 AND installation_id=?2",params![key,owner_id])?;
         if count==0 {return Err(missing());} chat_store::close(c,&key,now())?; Ok(())
     }).await?;
     s.notify(&sid);
+    if let Some(m) = &s.media {
+        m.close(&oid).await;
+    }
     Ok(Json(json!({"ok":true})))
 }
 async fn invitation(
@@ -481,13 +498,20 @@ async fn revoke(
     Path(iid): Path<String>,
 ) -> Result<Json<Value>> {
     let oid = owner(&s, &h).await?;
-    let sid=s.db(move |c| {
-        let sid:String=c.query_row("SELECT i.session_id FROM invitations i JOIN sessions s ON s.id=i.session_id WHERE i.id=?1 AND s.installation_id=?2",params![iid,oid],|r|r.get(0)).optional()?.ok_or_else(missing)?;
+    let owner_id = oid.clone();
+    let (sid,removed)=s.db(move |c| {
+        let sid:String=c.query_row("SELECT i.session_id FROM invitations i JOIN sessions s ON s.id=i.session_id WHERE i.id=?1 AND s.installation_id=?2",params![iid,owner_id],|r|r.get(0)).optional()?.ok_or_else(missing)?;
+        let removed=c.prepare("SELECT id FROM participants WHERE invitation_id=?1 AND status='admitted'")?.query_map([&iid],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
         let tx=c.transaction()?; tx.execute("UPDATE invitations SET revoked=1 WHERE id=?1",[&iid])?;
         tx.execute("UPDATE participants SET status='removed' WHERE invitation_id=?1",[iid])?;
-        tx.execute("UPDATE sessions SET revision=revision+1 WHERE id=?1",[&sid])?; tx.commit()?; Ok(sid)
+        tx.execute("UPDATE sessions SET revision=revision+1 WHERE id=?1",[&sid])?; tx.commit()?; Ok((sid,removed))
     }).await?;
     s.notify(&sid);
+    if let Some(m) = &s.media {
+        for pid in removed {
+            m.kick(&oid, &pid).await;
+        }
+    }
     Ok(Json(json!({"ok":true})))
 }
 #[derive(Deserialize)]
@@ -571,9 +595,9 @@ async fn decide(
         _ => return Err(invalid("Acción inválida")),
     };
     let oid = owner(&s, &h).await?;
-    let key = sid.clone();
+    let (key, owner_id, who) = (sid.clone(), oid.clone(), pid.clone());
     s.db(move |c| {
-        session_owned(c, &key, &oid)?;
+        session_owned(c, &key, &owner_id)?;
         let tx = c.transaction()?;
         let old: String = tx
             .query_row(
@@ -599,6 +623,12 @@ async fn decide(
     })
     .await?;
     s.notify(&sid);
+    // Retirado o rechazado: fuera también de la sala de cámara y audio, al momento.
+    if status != "admitted" {
+        if let Some(m) = &s.media {
+            m.kick(&oid, &who).await;
+        }
+    }
     Ok(Json(json!({"ok":true})))
 }
 #[derive(Deserialize)]
@@ -786,6 +816,9 @@ pub fn router(s: App) -> Router {
         .route("/api/v1/sessions/{sid}/participants/{pid}", post(decide))
         .route("/api/v1/join/{token}", post(join).get(resume))
         .route("/api/v1/guest", get(guest_state))
+        .route("/api/v1/guest/media", get(media::guest_token))
+        .route("/api/v1/media/token", post(media::token))
+        .route("/lk/{*rest}", any(media::proxy))
         .route("/api/v1/events", get(events))
         .route("/api/v1/chat/messages", get(chat::history).post(chat::send))
         .route("/api/v1/chat/messages/{id}", delete(chat::delete))
@@ -814,6 +847,15 @@ pub fn router(s: App) -> Router {
                 (
                     [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
                     include_str!("../web/chat.css"),
+                )
+            }),
+        )
+        .route(
+            "/livekit-client.umd.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../web/livekit-client.umd.js"),
                 )
             }),
         )

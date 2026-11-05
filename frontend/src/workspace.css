@@ -2127,7 +2127,6 @@ main {
 .destination-toggle span { display: grid; min-width: 0; }
 .destination-toggle small { opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.device-quality-info { display: block; opacity: 0.75; margin: -4px 0 6px; font-size: 12px; }
 
 /* Independent horizontal and vertical programs. */
 .scene-controls { background: #151f26; border: 1px solid #35434b; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }

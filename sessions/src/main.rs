@@ -1,5 +1,5 @@
 use std::{path::PathBuf, time::Duration};
-use streamhive_sessions::{App, Config, router};
+use streamhive_sessions::{App, Config, media, router};
 fn env(k: &str, d: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| d.into())
 }
@@ -35,8 +35,31 @@ async fn main() -> anyhow::Result<()> {
     config.requests_per_minute = env("REQUESTS_PER_MINUTE", "600").parse()?;
     config.max_connections = env("MAX_CONNECTIONS", "1000").parse()?;
     config.trust_proxy = env("TRUST_PROXY", "false") == "true";
+    // Claves y configuración de LiveKit: un volumen aparte, que el contenedor de LiveKit monta sin la base de datos.
+    let media_dir = PathBuf::from(env("MEDIA_DIR", &env("DATA_DIR", "/data")));
+    let migrate = args.get(1).is_some_and(|s| s == "migrate");
+    // Medios (cámara y audio): LiveKit en el mismo compose. Sin LIVEKIT_URL, solo espera y chat.
+    let livekit = env("LIVEKIT_URL", "");
+    if !livekit.is_empty() {
+        let ports = media::Ports {
+            udp: env("MEDIA_UDP_PORT", "7882").parse()?,
+            tcp: env("MEDIA_TCP_PORT", "7881").parse()?,
+        };
+        let ip = env("MEDIA_PUBLIC_IP", "");
+        if migrate {
+            media::setup(
+                &media_dir,
+                &livekit,
+                &ports,
+                Some(ip.as_str()).filter(|v| !v.is_empty()),
+            )?;
+            tracing::info!(udp = ports.udp, tcp = ports.tcp, "Media ready");
+        } else {
+            config.media = Some(media::Media::load(&media_dir, &livekit, ports)?);
+        }
+    }
     let state = App::open(config)?;
-    if args.get(1).is_some_and(|s| s == "migrate") {
+    if migrate {
         tracing::info!("Database ready");
         return Ok(());
     }

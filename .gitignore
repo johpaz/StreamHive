@@ -24,6 +24,7 @@ StreamingHive.txt
 /deploy/sessions/.env
 
 /sessions/web/chat.css
+/sessions/web/livekit-client.umd.js
 
 # Paquete local de Linux (scripts/package-linux.sh): se regenera; las versiones
 # publicadas salen de GitHub Actions (scripts/release.mjs).
