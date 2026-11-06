@@ -137,6 +137,15 @@ export function StudioWorkspace({
   const screens = people.filter((person) =>
     publication(person, "screen_share"),
   );
+  // Pantallas que alguien comparte y aún no están en el programa: el anfitrión las ve siempre,
+  // también en modo foco, con un botón para ponerlas al aire.
+  const offered = admin
+    ? screens.filter(
+        (x) =>
+          x.identity !== p.screen &&
+          x.identity !== media.room?.localParticipant.identity,
+      )
+    : [];
   const assets = studio.assets || [];
   const asset = assets.find((a) => a.id === p.media_asset);
   const content = p.layout === "screen";
@@ -1269,6 +1278,35 @@ export function StudioWorkspace({
   );
   const elapsed = broadcast ? Math.max(0, (clock + (studio.clock_offset || 0)) / 1000 - broadcast.created) : 0;
   const airing = (studio.destinations ?? []).filter((d) => d.enabled);
+  const screenOffer = offered.length > 0 && (
+    <div className="screen-offer" role="status">
+      <Icon name="monitor" size={15} />
+      <span>
+        <b>{names[offered[0].identity] || offered[0].name}</b> está compartiendo
+        pantalla
+        {offered.length > 1 ? ` (y ${offered.length - 1} más)` : ""}
+      </span>
+      <button
+        className="button primary"
+        disabled={pending}
+        onClick={() => source(offered[0].identity)}
+      >
+        Mostrar en programa
+      </button>
+      <button
+        className="button"
+        onClick={() => {
+          if (focus) {
+            setPanelClosed(false);
+            setPanelTab("sources");
+          }
+          setSourceTab("screens");
+        }}
+      >
+        Ver
+      </button>
+    </div>
+  );
   const focusStrip = (
     <div className="focus-strip">
       <span className={`broadcast-state ${broadcast?.status === "live" && live ? "is-live" : ""}`}>
@@ -1299,6 +1337,7 @@ export function StudioWorkspace({
       <span className="session-meta">
         {counters}
       </span>
+      {screenOffer}
       {waiting.length > 0 && (
         <button
           className="button focus-waiting"
@@ -1527,6 +1566,7 @@ export function StudioWorkspace({
           Se está mostrando una pantalla de {slateNames[activeSlate!.kind].toLowerCase()}: ahora no estás al aire, y el público no te ve ni te oye.
         </div>
       )}
+      {!focus && screenOffer}
       <div className={`studio-grid ${admin ? "" : "guest-workspace"}`}>
         <section className="workspace-main">
           <div className="studio-preview" ref={stageRef}>
@@ -1735,7 +1775,12 @@ export function StudioWorkspace({
               <Icon name="camera" />
               <span>Calidad de cámara</span>
             </button>
-            {!media.room ? (
+            {!media.room ||
+            !(
+              media.room.localParticipant.isMicrophoneEnabled ||
+              media.room.localParticipant.isCameraEnabled ||
+              media.room.localParticipant.isScreenShareEnabled
+            ) ? (
               <>
                 <button
                   className="button primary"

@@ -48,12 +48,13 @@ const fakeDevices = () => {
   };
   navigator.mediaDevices.getDisplayMedia = async () => keep(canvas("#00ffff"));
 };
-let browser, success = false;
+let browser, effectsBrowser, success = false;
 try {
   const [cloudPort, lk, udp, tcp, api, dead] = await Promise.all(Array.from({ length: 6 }, free));
   const cloud = `http://localhost:${cloudPort}`, origin = `http://localhost:${api}`;
   const serverEnv = {
     PUBLIC_URL: cloud, LISTEN_ADDR: `127.0.0.1:${cloudPort}`, DATA_DIR: join(work, "cloud"),
+    ASSETS_DIR: join(root, "frontend/public"),
     LIVEKIT_URL: `http://127.0.0.1:${lk}`, MEDIA_UDP_PORT: String(udp), MEDIA_TCP_PORT: String(tcp), MEDIA_PUBLIC_IP: "127.0.0.1",
   };
   execFileSync(join(bin, "streamhive-sessions"), ["migrate"], { env: { ...process.env, ...serverEnv }, stdio: "ignore" });
@@ -167,8 +168,36 @@ try {
   await media.getByRole("button", { name: "Compartir pantalla" }).click();
   await media.getByRole("button", { name: "Dejar de compartir" }).waitFor();
   await page.getByRole("tab", { name: /Pantallas/ }).click();
-  await page.locator(".screen-source").filter({ hasText: "Sara" }).waitFor();
+  const sharedScreen = page.locator(".screen-source").filter({ hasText: "Sara" });
+  await sharedScreen.waitFor();
+  await page.locator(".screen-offer").getByText("Sara").waitFor();
+  // Outside focus mode it floats: visible even with the page scrolled down to the sources.
+  await page.mouse.wheel(0, 2000);
+  await sleep(300);
+  const box = await page.locator(".screen-offer").boundingBox();
+  const view = page.viewportSize();
+  assert(box && box.y >= 0 && box.y + box.height <= view.height, "screen offer out of view: " + JSON.stringify(box));
+  await page.screenshot({ path: join(work, "screen-offer.png") });
+  // The host puts the guest's screen on the program: it stays there across reconcile rounds,
+  // shows in the host's stage and in the guest's view of the stage.
+  await sharedScreen.getByRole("button", { name: "Mostrar en programa" }).click();
+  await sharedScreen.getByRole("button", { name: "En programa" }).waitFor();
+  await sleep(7000);
+  const shown = (await get("/studio")).program;
+  assert(shown.screen === guestId && shown.layout === "screen", "guest screen not kept on the program: " + JSON.stringify({ screen: shown.screen, layout: shown.layout }));
+  const cyan = (sel) => (p) => p.evaluate((sel) => [...document.querySelectorAll(sel)].some((v) => {
+    if (!v.videoWidth) return false;
+    const c = Object.assign(document.createElement("canvas"), { width: 8, height: 8 });
+    const g = c.getContext("2d"); g.drawImage(v, 0, 0, 8, 8);
+    const [r, gr, b] = g.getImageData(2, 2, 1, 1).data;
+    return r < 90 && gr > 190 && b > 190;
+  }), sel);
+  for (let i = 0; !(await cyan(".studio-preview .stage video")(page)); i++) { assert(i < 50, "guest screen not in the host's stage"); await sleep(200); }
+  for (let i = 0; !(await cyan(".guest-studio .stage video")(guest)); i++) { assert(i < 50, "guest screen not in the guest's view of the stage"); await sleep(200); }
+  await page.screenshot({ path: join(work, "guest-screen-on-program.png") });
+  console.log("OK the guest's screen goes on the program and stays (host stage and guest view)");
   await media.getByRole("button", { name: "Dejar de compartir" }).click();
+  for (let i = 0; (await get("/studio")).program.screen; i++) { assert(i < 50, "program kept a screen that stopped"); await sleep(200); }
   await page.getByRole("tab", { name: /Participantes/ }).click();
   console.log("OK the guest connects camera, microphone and screen from the portal; the host sees the screen");
 
@@ -204,6 +233,18 @@ try {
   await other.getByText("Solicitud rechazada", { exact: true }).waitFor();
   for (let i = 0; (await get("/studio")).participants.some((p) => p.name === "Beto"); i++) { assert(i < 50, "rejected guest still in the studio"); await sleep(100); }
   console.log("OK during the recording (focus mode): alert, Ver opens the waiting list, rejected on the server");
+  // In focus mode a guest's screen is announced in the strip and goes on air from there.
+  await media.getByRole("button", { name: "Compartir pantalla" }).click();
+  const offer = page.locator(".focus-strip .screen-offer");
+  await offer.getByText("Sara").waitFor();
+  await page.screenshot({ path: join(work, "screen-offer-focus.png") });
+  await offer.getByRole("button", { name: "Mostrar en programa" }).click();
+  for (let i = 0; (await get("/studio")).program.screen !== guestId; i++) { assert(i < 50, "focus strip did not put the screen on the program"); await sleep(100); }
+  await offer.waitFor({ state: "detached" });
+  for (let i = 0; !(await cyan(".studio-preview .stage video")(page)); i++) { assert(i < 50, "guest screen not in the focus stage"); await sleep(200); }
+  await media.getByRole("button", { name: "Dejar de compartir" }).click();
+  for (let i = 0; (await get("/studio")).program.screen; i++) { assert(i < 60, "program kept a screen that stopped"); await sleep(200); }
+  console.log("OK focus mode: the strip announces the guest's screen and puts it on the program");
   await sleep(4000);
   await post("/broadcast/stop?all=true", {});
   for (let i = 0; i < 100 && (await get("/studio")).broadcast?.status !== "complete"; i++) await sleep(200);
@@ -238,11 +279,54 @@ try {
 
   // 7. "Retirar" in "Invitados del servidor" takes one guest out and off the list.
   const fresh = (await (await post("/remote-session/invitations", {})).json()).url;
-  const carlaCtx = await browser.newContext();
+  // Reopening the studio: the host is in the room to watch and listen without pressing anything,
+  // and without publishing (their camera and microphone stay off until they turn them on).
+  await page.reload();
+  await page.getByRole("heading", { name: "Mi estudio" }).waitFor();
+  await page.getByRole("button", { name: "Estudio en vivo" }).first().click();
+  await page.getByRole("button", { name: "Conectar cámara y audio" }).waitFor();
+  // Earlier guests are done: free their browsers before the camera-effects check.
+  for (const c of [guestCtx, otherCtx, lateCtx]) await c.close();
+  // Carla uses Chromium's own fake camera (like the host's effects smoke test).
+  // Effects use WebGL: this headless browser has no GPU, so it gets Chromium's software renderer
+  // (without it, Chromium itself crashes here; real browsers use the GPU).
+  effectsBrowser = await chromium.launch({
+    headless: true, executablePath: process.env.CHROMIUM_PATH || undefined,
+    args: ["--no-sandbox", "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+  });
+  const carlaCtx = await effectsBrowser.newContext({ permissions: ["camera", "microphone"] });
   const carla = await carlaCtx.newPage(); carla.setDefaultTimeout(20000);
+  carla.on("pageerror", (e) => errors.push("carla: " + e.message));
   await knock(carla, fresh, "Carla");
   await remoteList.getByRole("listitem").filter({ hasText: "Carla" }).getByRole("button", { name: "Admitir", exact: true }).click();
   await carla.locator(".guest-studio").waitFor();
+  // Camera effects for the guest too, served by the sessions server: real segmentation, blur.
+  const studio = carla.locator(".guest-studio");
+  await studio.getByRole("button", { name: "Encender cámara y micrófono" }).click();
+  await studio.getByRole("button", { name: "Apagar cámara" }).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll(".source-deck video")].some((v) => v.videoWidth > 0));
+  assert(await page.getByRole("button", { name: "Conectar cámara y audio" }).isVisible(), "host started publishing by itself");
+  console.log("OK the host sees the guest's camera without turning on their own camera");
+  await studio.getByRole("button", { name: "Efectos de cámara" }).click();
+  await carla.waitForFunction(() => document.querySelector(".effects-preview video")?.videoWidth > 0);
+  const blur = carla.getByRole("button", { name: "Desenfoque", exact: true });
+  for (let i = 0; (await blur.getAttribute("aria-pressed")) !== "true"; i++) {
+    assert(i < 30, "blur never selected");
+    await blur.click({ timeout: 60000 }).catch(() => {});
+    await sleep(500);
+  }
+  await carla.waitForFunction(() => { const b = [...document.querySelectorAll(".camera-effects-dialog button")].find((x) => x.textContent === "Aplicar"); return b && !b.disabled; }, {}, { timeout: 60000 });
+  await carla.getByRole("button", { name: "Aplicar", exact: true }).click({ timeout: 60000 });
+  await carla.locator(".camera-effects-dialog").waitFor({ state: "detached", timeout: 60000 });
+  await studio.locator(".control-button.sharing").filter({ hasText: "Efectos de cámara" }).waitFor();
+  await carla.screenshot({ path: join(work, "guest-effects.png") });
+  console.log("OK guest camera effects: blur applied from the portal (served by the sessions server)");
+  // With the effect running, the page stays responsive.
+  for (let i = 0; i < 3; i++) {
+    const lag = await carla.evaluate(() => new Promise((r) => { const t0 = performance.now(); setTimeout(() => r(performance.now() - t0), 0); }));
+    assert(lag < 500, `guest page sluggish with the effect: ${Math.round(lag)} ms`);
+    await sleep(1000);
+  }
   await remoteList.getByRole("listitem").filter({ hasText: "Carla" }).getByRole("button", { name: "Retirar", exact: true }).click();
   await carla.getByText(/Tu entrada fue retirada|El anfitrión te sacó de la sala/).waitFor();
   await remoteList.getByText("Carla").waitFor({ state: "detached" });
@@ -270,6 +354,7 @@ try {
   console.log("REMOTE MEDIA E2E OK", work);
 } finally {
   await browser?.close().catch(() => {});
+  await effectsBrowser?.close().catch(() => {});
   for (const p of children) { try { process.kill(-p.pid, "SIGKILL"); } catch {} }
   if (!success) console.log("work dir:", work);
 }

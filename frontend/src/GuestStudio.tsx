@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { audioMode, loadAudioMode } from "./audio-quality";
+import { CameraEffectsDialog } from "./CameraEffectsDialog";
 import { DeviceSetup } from "./DeviceSetup";
 import {
   assertMediaSupport,
@@ -7,7 +8,12 @@ import {
   listDevices,
   type CapturePreferences,
 } from "./devices";
-import { participants, publication, useRoom } from "./media";
+import {
+  participants,
+  publication,
+  useRoom,
+  type LocalCameraTrack,
+} from "./media";
 import { slateNames } from "./slate";
 import { MonitorAudio, Stage, TrackView } from "./Stage";
 import { StudioChat } from "./StudioChat";
@@ -128,6 +134,15 @@ export function GuestStudio({
   const [busy, setBusy] = useState(false);
   const [audioBlocked, setAudioBlocked] = useState(false);
   const [removed, setRemoved] = useState(false);
+  const [effectsOpen, setEffectsOpen] = useState(false);
+  // Efectos de cámara: solo si el servidor trae sus archivos (`/api/v1/meta` → effects).
+  const [effects, setEffects] = useState(false);
+  useEffect(() => {
+    void fetch("/api/v1/meta")
+      .then((r) => r.json())
+      .then((m) => setEffects(m.effects === true))
+      .catch(() => {});
+  }, []);
   const preview = useRef<HTMLDivElement>(null);
   const identity = `g-${me.id}`;
   const act = async (action: () => Promise<unknown>) => {
@@ -358,6 +373,17 @@ export function GuestStudio({
                     </span>
                   </button>
                 )}
+                {effects && (
+                  <button
+                    className={`control-button ${media.cameraEffect.mode !== "disabled" ? "sharing" : ""}`}
+                    disabled={!self!.isCameraEnabled}
+                    title={self!.isCameraEnabled ? undefined : "Enciende la cámara para usar efectos"}
+                    onClick={() => setEffectsOpen(true)}
+                  >
+                    <Icon name="camera" />
+                    <span>Efectos de cámara</span>
+                  </button>
+                )}
                 <button
                   className={`control-button ${devicesOpen ? "sharing" : ""}`}
                   aria-expanded={devicesOpen}
@@ -384,6 +410,14 @@ export function GuestStudio({
               </button>
             )}
           </div>
+          {effectsOpen && (
+            <CameraEffectsDialog
+              current={media.cameraEffect}
+              source={selfCamera?.track as LocalCameraTrack | undefined}
+              onApply={media.applyCameraEffect}
+              onClose={() => setEffectsOpen(false)}
+            />
+          )}
           {publishing && devicesOpen && (
             <LiveDevices switchDevice={media.switchActiveDevice} act={act} />
           )}

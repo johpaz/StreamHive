@@ -35,6 +35,13 @@ async fn main() -> anyhow::Result<()> {
     config.requests_per_minute = env("REQUESTS_PER_MINUTE", "600").parse()?;
     config.max_connections = env("MAX_CONNECTIONS", "1000").parse()?;
     config.trust_proxy = env("TRUST_PROXY", "false") == "true";
+    // Efectos de cámara y fondos del estudio para los invitados (la imagen los trae en esta carpeta).
+    let assets = PathBuf::from(env("ASSETS_DIR", "/usr/share/streamhive-sessions"));
+    if assets.join("effects/loader.mjs").is_file() {
+        config.assets = Some(assets);
+    } else {
+        tracing::warn!(dir = %assets.display(), "Camera effects not found: guests get none");
+    }
     // Claves y configuración de LiveKit: un volumen aparte, que el contenedor de LiveKit monta sin la base de datos.
     let media_dir = PathBuf::from(env("MEDIA_DIR", &env("DATA_DIR", "/data")));
     let migrate = args.get(1).is_some_and(|s| s == "migrate");

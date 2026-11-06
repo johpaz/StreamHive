@@ -64,6 +64,9 @@ pub struct Config {
     pub trust_proxy: bool,
     /// LiveKit del compose. Sin él, el servidor solo gestiona la espera, la admisión y el chat.
     pub media: Option<media::Media>,
+    /// Carpeta con los efectos de cámara (`effects/`) y los fondos (`backgrounds/`) del estudio.
+    /// Sin ella, el invitado no tiene efectos de cámara.
+    pub assets: Option<PathBuf>,
 }
 impl Config {
     pub fn new(public_url: &str, database: PathBuf) -> anyhow::Result<Self> {
@@ -91,6 +94,7 @@ impl Config {
             max_connections: 1000,
             trust_proxy: false,
             media: None,
+            assets: None,
         })
     }
 }
@@ -346,16 +350,94 @@ async fn guard(State(s): State<App>, req: Request, next: Next) -> Result<Respons
     }
     let mut r = next.run(req).await;
     r.headers_mut()
-        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+        .entry(header::CACHE_CONTROL)
+        .or_insert("no-store".parse().unwrap());
     r.headers_mut()
         .insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
     r.headers_mut()
         .insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
-    r.headers_mut().insert(header::CONTENT_SECURITY_POLICY,"default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'".parse().unwrap());
+    r.headers_mut()
+        .insert(header::CONTENT_SECURITY_POLICY, CSP.parse().unwrap());
     Ok(r)
 }
+const INDEX: &str = include_str!("../web/index.html");
+/// Solo scripts propios, más el importmap de los efectos (por su hash) y el WASM de MediaPipe.
+/// El worker y las imágenes `blob:` son del procesador de cámara (ritmo de fotogramas y fondo propio).
+static CSP: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let map = INDEX
+        .split_once(r#"<script type="importmap">"#)
+        .and_then(|(_, rest)| rest.split_once("</script>"))
+        .map(|(map, _)| map)
+        .expect("importmap in index.html");
+    let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(map.as_bytes()));
+    format!(
+        "default-src 'self'; connect-src 'self' blob:; style-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-{hash}'; worker-src 'self' blob:; img-src 'self' blob: data:; frame-ancestors 'none'; base-uri 'none'"
+    )
+});
+/// Archivos del estudio que el portal sirve tal cual: efectos de cámara y fondos incluidos.
+const ASSETS: &[(&str, &str)] = &[
+    ("effects/loader.mjs", "text/javascript; charset=utf-8"),
+    (
+        "effects/livekit-bridge.mjs",
+        "text/javascript; charset=utf-8",
+    ),
+    ("effects/processors.mjs", "text/javascript; charset=utf-8"),
+    (
+        "effects/vision/vision_bundle.mjs",
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "effects/vision/wasm/vision_wasm_internal.js",
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "effects/vision/wasm/vision_wasm_internal.wasm",
+        "application/wasm",
+    ),
+    (
+        "effects/vision/wasm/vision_wasm_nosimd_internal.js",
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "effects/vision/wasm/vision_wasm_nosimd_internal.wasm",
+        "application/wasm",
+    ),
+    (
+        "effects/selfie_segmenter.tflite",
+        "application/octet-stream",
+    ),
+    ("branding/streamhive-mark.svg", "image/svg+xml"),
+    ("backgrounds/office-daylight.webp", "image/webp"),
+    ("backgrounds/office-daylight-thumb.webp", "image/webp"),
+    ("backgrounds/office-warm.webp", "image/webp"),
+    ("backgrounds/office-warm-thumb.webp", "image/webp"),
+    ("backgrounds/streamer-neon.webp", "image/webp"),
+    ("backgrounds/streamer-neon-thumb.webp", "image/webp"),
+    ("backgrounds/podcast-studio.webp", "image/webp"),
+    ("backgrounds/podcast-studio-thumb.webp", "image/webp"),
+];
+async fn asset(State(s): State<App>, req: Request) -> Result<Response> {
+    let path = req.uri().path().trim_start_matches('/');
+    let (Some(dir), Some((name, kind))) = (
+        s.config.assets.as_ref(),
+        ASSETS.iter().find(|(name, _)| *name == path),
+    ) else {
+        return Err(missing());
+    };
+    let bytes = tokio::fs::read(dir.join(name))
+        .await
+        .map_err(|_| missing())?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, *kind),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
 async fn meta(State(s): State<App>) -> Json<Value> {
-    let mut v = json!({"service":"streamhive-sessions","protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION"),"media":s.media.is_some(),"features":["cleanup"]});
+    let mut v = json!({"service":"streamhive-sessions","protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION"),"media":s.media.is_some(),"features":["cleanup"],"effects":s.config.assets.is_some()});
     if let Some(m) = &s.media {
         v["media_ports"] = json!({"udp":m.ports.udp,"tcp":m.ports.tcp});
         v["media_ready"] = json!(m.ready().await);
@@ -930,14 +1012,11 @@ pub fn router(s: App) -> Router {
         .route("/api/v1/chat/messages/{id}", delete(chat::delete))
         .route("/api/v1/chat/files", post(chat::upload))
         .route("/api/v1/chat/files/{id}", get(chat::download))
-        .route(
-            "/",
-            get(|| async { Html(include_str!("../web/index.html")) }),
-        )
-        .route(
-            "/join/{token}",
-            get(|| async { Html(include_str!("../web/index.html")) }),
-        )
+        .route("/", get(|| async { Html(INDEX) }))
+        .route("/join/{token}", get(|| async { Html(INDEX) }))
+        .route("/effects/{*path}", get(asset))
+        .route("/backgrounds/{file}", get(asset))
+        .route("/branding/{file}", get(asset))
         .route(
             "/guest.js",
             get(|| async {

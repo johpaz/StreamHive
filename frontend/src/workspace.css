@@ -2313,6 +2313,15 @@ main {
 .focus-destination.is-live i { background: var(--accent); }
 .focus-destination.is-reconnecting i, .focus-destination.is-connecting i { background: #e8b65a; }
 .focus-strip .focus-waiting { color: #10151c; background: #e8b65a; border-color: #e8b65a; font-weight: 600; }
+.screen-offer { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; padding: 8px 12px; border: 1px solid #2f6f7a; border-radius: 10px; background: #10262b; color: #cdeff4; font-size: 13px; }
+.screen-offer > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.screen-offer .button { padding: 6px 10px; font-size: 12px; white-space: nowrap; }
+.screen-offer .button.primary { margin-left: auto; }
+/* Fuera del modo foco el aviso flota arriba: se ve aunque la página esté desplazada. */
+.studio-workspace:not(.is-focus) > .screen-offer { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 60; margin: 0; max-width: calc(100vw - 32px); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); }
+@media (max-width: 700px) { .studio-workspace:not(.is-focus) > .screen-offer { left: 16px; right: 16px; transform: none; flex-wrap: wrap; } }
+.focus-strip .screen-offer { margin: 0; padding: 3px 4px 3px 10px; font-size: 11px; min-width: 0; }
+.focus-strip .screen-offer .button { font-size: 11px; padding: 5px 9px; }
 .is-focus .studio-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 0; align-items: stretch; }
 .is-focus .studio-grid:has(.focus-panel.is-closed) { grid-template-columns: minmax(0, 1fr) 44px; }
 .is-focus .workspace-main { min-height: 0; overflow-y: auto; padding: 10px 12px; }

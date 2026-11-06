@@ -1062,3 +1062,93 @@ async fn cleaning_the_guest_list_keeps_who_is_in_and_can_empty_everything() {
         json!(["cleanup"])
     );
 }
+#[tokio::test]
+async fn camera_effects_are_served_from_the_allowlist_with_their_csp() {
+    let dir = std::env::temp_dir().join(format!("sh-assets-{}", id()));
+    std::fs::create_dir_all(dir.join("effects")).unwrap();
+    std::fs::create_dir_all(dir.join("backgrounds")).unwrap();
+    std::fs::write(dir.join("effects/loader.mjs"), "export {}").unwrap();
+    std::fs::write(dir.join("backgrounds/office-warm.webp"), b"RIFF").unwrap();
+    std::fs::write(dir.join("effects/secret.txt"), "no").unwrap();
+    let raw = |s: App, path: &'static str| async move {
+        router(s)
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    };
+    // Without the folder, nothing is served.
+    let bare = app();
+    assert_eq!(
+        raw(bare.clone(), "/effects/loader.mjs").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&bare, "GET", "/api/v1/meta", None, None, Value::Null)
+            .await
+            .2["effects"],
+        false
+    );
+    let p = std::env::temp_dir()
+        .join(format!("sh-sessions-test-{}", id()))
+        .join("sessions.sqlite");
+    let mut config = Config::new("http://localhost:8080", p).unwrap();
+    config.assets = Some(dir);
+    let s = App::open(config).unwrap();
+    assert_eq!(
+        call(&s, "GET", "/api/v1/meta", None, None, Value::Null)
+            .await
+            .2["effects"],
+        true
+    );
+    let r = raw(s.clone(), "/effects/loader.mjs").await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(
+        r.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/javascript")
+    );
+    assert_eq!(r.headers()[header::CACHE_CONTROL], "public, max-age=86400");
+    assert_eq!(
+        raw(s.clone(), "/backgrounds/office-warm.webp")
+            .await
+            .headers()[header::CONTENT_TYPE],
+        "image/webp"
+    );
+    // Only the allowlist: no other files, no way out of the folder.
+    for path in [
+        "/effects/secret.txt",
+        "/effects/../effects/loader.mjs",
+        "/effects/%2e%2e/secret.txt",
+        "/backgrounds/x.webp",
+    ] {
+        assert_eq!(
+            raw(s.clone(), path).await.status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    // The page's import map is allowed by its hash, WASM can run, and API answers stay uncached.
+    let page = raw(s.clone(), "/join/abc").await;
+    let csp = page.headers()[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let map = INDEX
+        .split_once(r#"<script type="importmap">"#)
+        .unwrap()
+        .1
+        .split_once("</script>")
+        .unwrap()
+        .0;
+    let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(map.as_bytes()));
+    assert!(
+        csp.contains(&format!("'sha256-{hash}'")) && csp.contains("'wasm-unsafe-eval'"),
+        "{csp}"
+    );
+    assert!(!csp.contains("unsafe-inline"));
+    assert_eq!(
+        raw(s.clone(), "/api/v1/meta").await.headers()[header::CACHE_CONTROL],
+        "no-store"
+    );
+}

@@ -162,6 +162,23 @@ function App() {
   useEffect(() => {
     if (me && !admitted && media.room) void media.disconnect();
   }, [admitted]);
+  // El anfitrión entra en la sala para ver y oír en cuanto abre el estudio: cámaras y pantallas de
+  // los invitados (y su aviso) llegan sin pulsar nada. Su cámara y su micrófono, cuando él los enciende.
+  const [watchRetry, setWatchRetry] = useState(0);
+  useEffect(() => {
+    if (me?.role !== "admin" || !studio || media.room || media.busy) return;
+    const wait = watchRetry ? Math.min(30000, 2000 * 2 ** watchRetry) : 0;
+    const timer = setTimeout(() => {
+      media.connect().then(
+        () => setWatchRetry(0),
+        () => {
+          media.setError("");
+          setWatchRetry((n) => n + 1);
+        },
+      );
+    }, wait);
+    return () => clearTimeout(timer);
+  }, [me?.role, Boolean(studio), media.room, media.busy, watchRetry]);
   const setProgram = (patch: Partial<Program>) =>
     run(() => api(`/program?format=${format}`, "PUT", { ...(format === "portrait" ? studio!.portrait_program : studio!.program), ...patch }));
   const connect = () =>
