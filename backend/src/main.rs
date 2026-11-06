@@ -610,21 +610,52 @@ async fn participant_action(
             .get(&identity)
             .is_some_and(|p| p.invite == remote::REMOTE_INVITE)
     };
-    // Invitados del servidor: la admisión se decide en el servidor; retirarlos, también.
+    // Invitados del servidor: admitir, rechazar y retirar se deciden en el servidor; el estado
+    // vuelve por el canal de control (`remote::sync_guests`).
     if remote_guest && body.action != "mute" {
-        if body.action != "remove" {
-            return Err(bad(
-                "Este invitado entró por el servidor de sesiones: gestiónalo en Invitados del servidor",
-            ));
+        let (status, admitted, cap, limited) = {
+            let d = s.data.lock().await;
+            let admitted = d
+                .participants
+                .values()
+                .filter(|p| p.status == "admitted")
+                .count();
+            (
+                d.participants[&identity].status.clone(),
+                admitted,
+                s.admitted_cap(&d),
+                d.admitted_limit.is_some(),
+            )
+        };
+        let action = match (body.action.as_str(), status.as_str()) {
+            ("admit", "waiting") => {
+                if limited && admitted >= cap {
+                    return Err(bad(&format!(
+                        "Cupo de invitados completo ({cap}): súbelo o saca a alguien de la sala"
+                    )));
+                }
+                "admit"
+            }
+            ("remove", "waiting") => "reject",
+            ("remove", _) => "remove",
+            _ => {
+                return Err(bad(
+                    "Este invitado entró por el servidor de sesiones: no puede volver a la sala de espera",
+                ));
+            }
+        };
+        remote::decide_guest(&s, &identity, action).await?;
+        if action != "admit" {
+            {
+                let mut d = s.data.lock().await;
+                d.participants.remove(&identity);
+                d.remove_from_program(&identity);
+                s.persist(&mut d)?;
+            }
+            if status == "admitted" {
+                let _ = rtc::remove(&s, &identity).await;
+            }
         }
-        remote::remove_guest(&s, &identity).await?;
-        {
-            let mut d = s.data.lock().await;
-            d.participants.remove(&identity);
-            d.remove_from_program(&identity);
-            s.persist(&mut d)?;
-        }
-        let _ = rtc::remove(&s, &identity).await;
         return Ok(Json(json!({"ok":true})));
     }
     if body.action == "mute" {

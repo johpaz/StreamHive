@@ -6,6 +6,7 @@ import { ProfileSettings, Welcome, initials } from "./Account";
 import { audioMode, loadAudioMode } from "./audio-quality";
 import { RemoteSessions } from "./RemoteSessions";
 import { InviteBanner, type Invite } from "./InviteBanner";
+import { ArrivalAlert } from "./ArrivalAlert";
 import { Scenes } from "./Scenes";
 import { Slates } from "./Slates";
 import { useFocusMode, useStoredFlag } from "./useFocusMode";
@@ -292,6 +293,20 @@ function App() {
       {(admitted ||
         studio?.participants.find((p) => p.id === me.id)?.status ===
           "waiting") && <StudioChat key={me.id} me={me} />}
+      {admin && studio && (
+        <ArrivalAlert
+          waiting={studio.participants.filter((p) => p.status === "waiting")}
+          onAdmit={(id) => void run(() => api(`/participants/${id}`, "POST", { action: "admit" }))}
+          onShow={() => {
+            setTab("studio");
+            setTimeout(() => {
+              const focusButton = document.querySelector<HTMLButtonElement>(".focus-waiting");
+              if (focusButton) focusButton.click();
+              else document.querySelector(".waiting-list")?.scrollIntoView({ behavior: "smooth", block: "center" });
+            }, 60);
+          }}
+        />
+      )}
       <DesktopRenderer key={broadcast?.id} active={admin && running} />
       <aside className="sidebar">
         <button

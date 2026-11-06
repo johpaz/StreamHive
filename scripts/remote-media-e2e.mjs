@@ -108,13 +108,17 @@ try {
   await guest.getByLabel("Tu nombre").fill("Sara");
   await guest.getByRole("button", { name: "Solicitar entrada" }).click();
   await guest.getByText("Esperando al anfitrión", { exact: true }).waitFor();
-  const remotePanel = page.getByRole("region", { name: "Invitados del servidor" });
-  await remotePanel.getByRole("list", { name: "Invitados remotos" }).locator("li").filter({ hasText: "Sara" }).getByRole("button", { name: "Admitir", exact: true }).click();
+  // The host is told: alert with the name, and Sara in the studio's waiting list (like local guests).
+  const alert = page.locator(".arrival-alert");
+  await alert.getByText("Sara quiere entrar").waitFor();
+  await page.locator(".waiting-list").getByText("Sara").waitFor();
+  assert((await get("/studio")).participants.some((p) => p.name === "Sara" && p.status === "waiting" && p.id.startsWith("g-")), "server guest not waiting in the studio");
+  await alert.getByRole("button", { name: "Admitir" }).click();
   await guest.getByText("Entrada aprobada", { exact: true }).waitFor();
   let guestId;
   for (let i = 0; !(guestId = (await get("/studio")).participants.find((p) => p.name === "Sara" && p.status === "admitted")?.id); i++) { assert(i < 50, "admitted guest not in the studio"); await sleep(100); }
   assert(guestId.startsWith("g-"), "guest id: " + guestId);
-  console.log("OK admitted on the server → participant of the studio", guestId);
+  console.log("OK alert + studio waiting list; admitted from the alert → participant of the studio", guestId);
 
   // 4. With the portal's own buttons: camera, microphone and screen.
   const media = guest.getByRole("region", { name: "Tu cámara y audio" });
@@ -147,7 +151,21 @@ try {
   assert(started.ok(), "recording/start: " + (await started.text()));
   const toggle = await post("/remote-server/media", { enabled: false }, "PUT");
   assert(toggle.status() === 400, "media switched during a recording");
-  await sleep(8000);
+  // Someone arrives during the recording, in focus mode: alert visible, rejected from the studio.
+  await page.locator(".app-shell.focus-mode").waitFor();
+  const otherCtx = await browser.newContext();
+  const other = await otherCtx.newPage(); other.setDefaultTimeout(20000);
+  await other.goto(invite);
+  await other.getByLabel("Tu nombre").fill("Beto");
+  await other.getByRole("button", { name: "Solicitar entrada" }).click();
+  await page.locator(".arrival-alert").getByText("Beto quiere entrar").waitFor();
+  await page.screenshot({ path: join(work, "alert-focus.png") });
+  await page.locator(".arrival-alert").getByRole("button", { name: "Ver" }).click();
+  await page.getByRole("button", { name: "Rechazar Beto" }).click();
+  await other.getByText("Solicitud rechazada", { exact: true }).waitFor();
+  for (let i = 0; (await get("/studio")).participants.some((p) => p.name === "Beto"); i++) { assert(i < 50, "rejected guest still in the studio"); await sleep(100); }
+  console.log("OK during the recording (focus mode): alert, Ver opens the waiting list, rejected on the server");
+  await sleep(4000);
   await post("/broadcast/stop?all=true", {});
   for (let i = 0; i < 100 && (await get("/studio")).broadcast?.status !== "complete"; i++) await sleep(200);
   await sleep(1000);

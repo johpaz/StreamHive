@@ -428,19 +428,22 @@ pub async fn revoke(State(s): State<App>, h: HeaderMap, Path(iid): Path<String>)
 }
 /// Marca de los participantes del estudio que son invitados del servidor (`g-<id>`).
 pub const REMOTE_INVITE: &str = "remote";
-/// Invitados admitidos en el servidor = participantes del estudio, para verlos en Fuentes →
-/// Personas y llevarlos al programa. Solo cuando la cámara y el audio van por el servidor.
+/// Invitados del servidor = participantes del estudio (`g-<id>`): quien espera aparece en la sala
+/// de espera del estudio (con aviso), y los admitidos en Fuentes → Participantes cuando la cámara
+/// y el audio van por el servidor (sin medios, los admitidos solo están en el chat).
 pub async fn sync_guests(s: &App) {
-    let admitted: Vec<(String, String)> = if media_target(s).is_some() {
+    let media = media_target(s).is_some();
+    let guests: Vec<(String, String, String)> = if saved(s).ok().flatten().is_some() {
         s.remote.state.lock().unwrap()["snapshot"]["participants"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|p| p["status"] == "admitted")
+            .filter(|p| p["status"] == "waiting" || (media && p["status"] == "admitted"))
             .filter_map(|p| {
                 Some((
                     format!("g-{}", p["id"].as_str()?),
                     p["name"].as_str()?.to_owned(),
+                    p["status"].as_str()?.to_owned(),
                 ))
             })
             .collect()
@@ -449,26 +452,33 @@ pub async fn sync_guests(s: &App) {
     };
     let mut d = s.data.lock().await;
     let mut changed = false;
-    for (id, name) in &admitted {
-        if !d.participants.contains_key(id) {
-            d.participants.insert(
-                id.clone(),
-                crate::model::Participant {
-                    id: id.clone(),
-                    name: name.clone(),
-                    status: "admitted".into(),
-                    invite: REMOTE_INVITE.into(),
-                    created: crate::now(),
-                    connected: false,
-                },
-            );
-            changed = true;
+    for (id, name, status) in &guests {
+        match d.participants.get_mut(id) {
+            Some(p) if p.status != *status => {
+                p.status = status.clone();
+                changed = true;
+            }
+            Some(_) => {}
+            None => {
+                d.participants.insert(
+                    id.clone(),
+                    crate::model::Participant {
+                        id: id.clone(),
+                        name: name.clone(),
+                        status: status.clone(),
+                        invite: REMOTE_INVITE.into(),
+                        created: crate::now(),
+                        connected: false,
+                    },
+                );
+                changed = true;
+            }
         }
     }
     let gone: Vec<String> = d
         .participants
         .values()
-        .filter(|p| p.invite == REMOTE_INVITE && !admitted.iter().any(|(id, _)| id == &p.id))
+        .filter(|p| p.invite == REMOTE_INVITE && !guests.iter().any(|(id, ..)| id == &p.id))
         .map(|p| p.id.clone())
         .collect();
     for id in gone {
@@ -480,8 +490,8 @@ pub async fn sync_guests(s: &App) {
         let _ = s.persist(&mut d);
     }
 }
-/// Retira en el servidor a un invitado remoto desde el estudio (`g-<id>`).
-pub async fn remove_guest(s: &App, identity: &str) -> Result<(), Error> {
+/// Decide en el servidor sobre un invitado remoto desde el estudio (`g-<id>`): admit, reject o remove.
+pub async fn decide_guest(s: &App, identity: &str, action: &str) -> Result<(), Error> {
     let pid = identity.strip_prefix("g-").ok_or_else(denied)?;
     let c = configured(s).await?;
     let sid = current_id(s)?;
@@ -490,7 +500,7 @@ pub async fn remove_guest(s: &App, identity: &str) -> Result<(), Error> {
         Some(credential(s, &c)?),
         reqwest::Method::POST,
         &format!("/sessions/{sid}/participants/{pid}"),
-        Some(json!({"action":"remove"})),
+        Some(json!({"action":action})),
     )
     .await?;
     Ok(())

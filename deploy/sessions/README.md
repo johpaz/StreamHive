@@ -18,7 +18,7 @@ Todo está en un solo archivo, `compose.yaml`. En el VPS solo necesitas ese arch
 
 ```dotenv
 SESSIONS_DOMAIN=sesiones.hiveagents.io
-SESSIONS_TAG=0.1.0
+SESSIONS_TAG=0.2.0
 ```
 
 Las etiquetas de Traefik van fijas, como en el resto de servicios del VPS: red externa `n8n_evoapi`, entrypoint `websecure`, resolver `mytlschallenge` y cabeceras HSTS. El servidor está en la red `backend` (compartida con la migración) y en `n8n_evoapi`, por la que entra Traefik. No se publica el puerto 8080 en el host: Traefik termina HTTPS y reenvía HTTP/WebSocket por la red Docker.
