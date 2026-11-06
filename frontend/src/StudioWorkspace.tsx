@@ -134,6 +134,14 @@ export function StudioWorkspace({
   }, [p.media_asset]);
   useEffect(() => () => upload.current?.abort(), []);
   const people = participants(media.room);
+  // El anfitrión está en la sala para ver y oír desde que abre el estudio; publica al encender.
+  const self = media.room?.localParticipant;
+  const publishing = Boolean(
+    self &&
+      (self.isMicrophoneEnabled ||
+        self.isCameraEnabled ||
+        self.isScreenShareEnabled),
+  );
   const screens = people.filter((person) =>
     publication(person, "screen_share"),
   );
@@ -1775,12 +1783,7 @@ export function StudioWorkspace({
               <Icon name="camera" />
               <span>Calidad de cámara</span>
             </button>
-            {!media.room ||
-            !(
-              media.room.localParticipant.isMicrophoneEnabled ||
-              media.room.localParticipant.isCameraEnabled ||
-              media.room.localParticipant.isScreenShareEnabled
-            ) ? (
+            {!publishing ? (
               <>
                 <button
                   className="button primary"
@@ -1803,7 +1806,7 @@ export function StudioWorkspace({
             ) : (
               <>
                 <button
-                  className={`control-button ${media.room.localParticipant.isMicrophoneEnabled ? "" : "is-off"}`}
+                  className={`control-button ${media.room!.localParticipant.isMicrophoneEnabled ? "" : "is-off"}`}
                   title="Control de tu micrófono en la sala"
                   onClick={() =>
                     onAction(() =>
@@ -1815,13 +1818,13 @@ export function StudioWorkspace({
                 >
                   <Icon name="mic" />
                   <span>
-                    {media.room.localParticipant.isMicrophoneEnabled
+                    {media.room!.localParticipant.isMicrophoneEnabled
                       ? "Silenciar"
                       : "Activar micrófono"}
                   </span>
                 </button>
                 <button
-                  className={`control-button ${media.room.localParticipant.isCameraEnabled ? "" : "is-off"}`}
+                  className={`control-button ${media.room!.localParticipant.isCameraEnabled ? "" : "is-off"}`}
                   disabled={pending || media.busy}
                   onClick={() =>
                     onAction(() =>
@@ -1833,7 +1836,7 @@ export function StudioWorkspace({
                 >
                   <Icon name="camera" />
                   <span>
-                    {media.room.localParticipant.isCameraEnabled
+                    {media.room!.localParticipant.isCameraEnabled
                       ? "Apagar cámara"
                       : "Activar cámara"}
                   </span>
@@ -1842,12 +1845,12 @@ export function StudioWorkspace({
                 {typeof navigator.mediaDevices?.getDisplayMedia ===
                   "function" && (
                   <button
-                    className={`control-button ${media.room.localParticipant.isScreenShareEnabled ? "sharing" : ""}`}
+                    className={`control-button ${media.room!.localParticipant.isScreenShareEnabled ? "sharing" : ""}`}
                     onClick={share}
                   >
                     <Icon name="monitor" />
                     <span>
-                      {media.room.localParticipant.isScreenShareEnabled
+                      {media.room!.localParticipant.isScreenShareEnabled
                         ? "Dejar de compartir"
                         : "Compartir pantalla"}
                     </span>
@@ -1880,7 +1883,7 @@ export function StudioWorkspace({
               </>
             )}
           </div>
-          {!media.room && deviceOpen && (
+          {!publishing && deviceOpen && (
             <DeviceSetup
               onPreferences={onPreferences}
               suspended={media.busy || pending}
