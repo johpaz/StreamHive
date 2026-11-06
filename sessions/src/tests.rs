@@ -768,3 +768,297 @@ async fn chat_files_reach_waiting_guests_and_never_rejected_ones() {
         StatusCode::NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn the_hosts_stage_reaches_admitted_guests_only() {
+    let s = app();
+    let t = install(&s).await;
+    let sid = room(&s, &t).await;
+    let i = invite(&s, &t, &sid).await;
+    let (cookie, guest) = join_guest(&s, &i, "Ana").await;
+    let pid = guest["participant_id"].as_str().unwrap().to_owned();
+    let stage = json!({"program":{"layout":"grid","identities":[format!("g-{pid}")]},"names":{"host":"Eva"},"live":true});
+    let path = format!("/api/v1/sessions/{sid}/stage");
+    // Only the owner publishes, with a bounded object.
+    let other = install(&s).await;
+    assert_eq!(
+        call(&s, "PUT", &path, Some(&other), None, stage.clone())
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&s, "PUT", &path, None, Some(&cookie), stage.clone())
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&s, "PUT", &path, Some(&t), None, json!([1])).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let big = json!({"x":"a".repeat(STAGE_LIMIT)});
+    assert_ne!(
+        call(&s, "PUT", &path, Some(&t), None, big).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&s, "PUT", &path, Some(&t), None, stage.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let guest_state = |s: App, cookie: String| async move {
+        call(&s, "GET", "/api/v1/guest", None, Some(&cookie), Value::Null)
+            .await
+            .2
+    };
+    // Waiting: nothing of the stage yet.
+    assert!(
+        guest_state(s.clone(), cookie.clone())
+            .await
+            .get("stage")
+            .is_none()
+    );
+    let decide = format!("/api/v1/sessions/{sid}/participants/{pid}");
+    call(
+        &s,
+        "POST",
+        &decide,
+        Some(&t),
+        None,
+        json!({"action":"admit"}),
+    )
+    .await;
+    assert_eq!(guest_state(s.clone(), cookie.clone()).await["stage"], stage);
+    // The host's own snapshot never carries it, and closing the session drops it.
+    assert!(
+        call(
+            &s,
+            "GET",
+            &format!("/api/v1/sessions/{sid}"),
+            Some(&t),
+            None,
+            Value::Null
+        )
+        .await
+        .2
+        .get("stage")
+        .is_none()
+    );
+    call(
+        &s,
+        "POST",
+        &format!("/api/v1/sessions/{sid}/close"),
+        Some(&t),
+        None,
+        json!({}),
+    )
+    .await;
+    assert!(s.stages.lock().unwrap().get(&sid).is_none());
+}
+#[tokio::test]
+async fn cleaning_the_guest_list_keeps_who_is_in_and_can_empty_everything() {
+    let s = app();
+    let t = install(&s).await;
+    let sid = room(&s, &t).await;
+    let path = format!("/api/v1/sessions/{sid}/cleanup");
+    let session = |s: App, t: String, sid: String| async move {
+        call(
+            &s,
+            "GET",
+            &format!("/api/v1/sessions/{sid}"),
+            Some(&t),
+            None,
+            Value::Null,
+        )
+        .await
+        .2
+    };
+    let decide = |pid: &Value, action: &str| {
+        let (s, t, sid, pid, action) = (
+            s.clone(),
+            t.clone(),
+            sid.clone(),
+            pid.as_str().unwrap().to_owned(),
+            action.to_owned(),
+        );
+        async move {
+            call(
+                &s,
+                "POST",
+                &format!("/api/v1/sessions/{sid}/participants/{pid}"),
+                Some(&t),
+                None,
+                json!({"action":action}),
+            )
+            .await
+            .0
+        }
+    };
+    let i = invite(&s, &t, &sid).await;
+    let dead = invite(&s, &t, &sid).await;
+    let (in_cookie, inside) = join_guest(&s, &i, "Ana").await;
+    let (_, waiting) = join_guest(&s, &i, "Luis").await;
+    let (_, rejected) = join_guest(&s, &i, "Eva").await;
+    let (out_cookie, removed) = join_guest(&s, &i, "Raúl").await;
+    assert_eq!(
+        decide(&inside["participant_id"], "admit").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        decide(&removed["participant_id"], "admit").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        decide(&removed["participant_id"], "remove").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        decide(&rejected["participant_id"], "reject").await,
+        StatusCode::OK
+    );
+    call(
+        &s,
+        "DELETE",
+        &format!("/api/v1/invitations/{}", dead["id"].as_str().unwrap()),
+        Some(&t),
+        None,
+        Value::Null,
+    )
+    .await;
+    // Only the owner cleans, with a known scope.
+    let other = install(&s).await;
+    assert_eq!(
+        call(
+            &s,
+            "POST",
+            &path,
+            Some(&other),
+            None,
+            json!({"scope":"all"})
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &s,
+            "POST",
+            &path,
+            None,
+            Some(&in_cookie),
+            json!({"scope":"all"})
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&s, "POST", &path, Some(&t), None, json!({"scope":"todo"}))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    // Finished: rejected, removed and dead links go; who is in or waiting stays.
+    assert_eq!(
+        call(
+            &s,
+            "POST",
+            &path,
+            Some(&t),
+            None,
+            json!({"scope":"finished"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let snap = session(s.clone(), t.clone(), sid.clone()).await;
+    let mut names: Vec<_> = snap["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["Ana", "Luis"]);
+    let links: Vec<_> = snap["invitations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].clone())
+        .collect();
+    assert_eq!(links, [i["id"].clone()]);
+    assert_eq!(
+        call(
+            &s,
+            "GET",
+            "/api/v1/guest",
+            None,
+            Some(&out_cookie),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    // All: nobody left, every link revoked and gone, the stage dropped, nobody gets back in.
+    call(
+        &s,
+        "PUT",
+        &format!("/api/v1/sessions/{sid}/stage"),
+        Some(&t),
+        None,
+        json!({"live":true}),
+    )
+    .await;
+    assert_eq!(
+        call(&s, "POST", &path, Some(&t), None, json!({"scope":"all"}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let snap = session(s.clone(), t.clone(), sid.clone()).await;
+    assert_eq!(snap["participants"], json!([]));
+    assert_eq!(snap["invitations"], json!([]));
+    assert_eq!(snap["session"]["closed"], false);
+    assert!(s.stages.lock().unwrap().get(&sid).is_none());
+    assert_eq!(
+        call(
+            &s,
+            "GET",
+            "/api/v1/guest",
+            None,
+            Some(&in_cookie),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let token = i["url"].as_str().unwrap().rsplit('/').next().unwrap();
+    assert_eq!(
+        call(
+            &s,
+            "POST",
+            &format!("/api/v1/join/{token}"),
+            None,
+            None,
+            json!({"name":"Ana"})
+        )
+        .await
+        .0,
+        StatusCode::GONE
+    );
+    // The session goes on: a new link for the new day works.
+    let fresh = invite(&s, &t, &sid).await;
+    join_guest(&s, &fresh, "Nuevo").await;
+    assert_eq!(
+        call(&s, "GET", "/api/v1/meta", None, None, Value::Null)
+            .await
+            .2["features"],
+        json!(["cleanup"])
+    );
+}

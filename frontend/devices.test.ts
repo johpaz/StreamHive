@@ -89,3 +89,37 @@ describe("independent device preflight", () => {
     expect(result.video).toBeNull();
   });
 });
+import { listDevices } from "./src/devices";
+describe("device names", () => {
+  const info = (kind: MediaDeviceKind, label: string) =>
+    ({ kind, label, deviceId: kind + label, groupId: "" }) as MediaDeviceInfo;
+  it("asks briefly for each hidden kind and lists again with the real names", async () => {
+    let granted = false;
+    const asked: MediaStreamConstraints[] = [];
+    const stopped: string[] = [];
+    const devices = {
+      enumerateDevices: async () =>
+        granted
+          ? [info("audioinput", "USB Mic"), info("videoinput", "HD Webcam")]
+          : [info("audioinput", ""), info("videoinput", "")],
+      getUserMedia: async (c: MediaStreamConstraints) => {
+        asked.push(c);
+        granted = true;
+        return { getTracks: () => [{ stop: () => stopped.push(c.audio ? "audio" : "video") }] } as unknown as MediaStream;
+      },
+    };
+    const list = await listDevices(devices);
+    expect(list.map((d) => d.label)).toEqual(["USB Mic", "HD Webcam"]);
+    expect(asked).toEqual([{ audio: true, video: false }, { audio: false, video: true }]);
+    expect(stopped).toEqual(["audio", "video"]);
+  });
+  it("does not ask when the names are already visible, and survives a denied permission", async () => {
+    let calls = 0;
+    const visible = { enumerateDevices: async () => [info("audioinput", "Mic")], getUserMedia: async () => { calls++; throw Error(); } };
+    expect((await listDevices(visible))[0].label).toBe("Mic");
+    expect(calls).toBe(0);
+    const denied = { enumerateDevices: async () => [info("audioinput", "")], getUserMedia: async () => { calls++; throw Error("NotAllowed"); } };
+    expect((await listDevices(denied))[0].label).toBe("");
+    expect(calls).toBe(1);
+  });
+});

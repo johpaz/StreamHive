@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   assertMediaSupport,
   deviceError,
+  listDevices,
   probeInputs,
   stopPreview,
   type CapturePreferences,
@@ -66,7 +67,7 @@ export function DeviceSetup({
         isSecureContext: window.isSecureContext,
         mediaDevices: navigator.mediaDevices,
       });
-      setDevices(await navigator.mediaDevices.enumerateDevices());
+      setDevices(await listDevices(navigator.mediaDevices));
     } catch (error) {
       setErrors([deviceError(error)]);
     }

@@ -9,7 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{any, delete, get, post},
+    routing::{any, delete, get, post, put},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::{SinkExt, StreamExt, stream::FusedStream};
@@ -127,6 +127,9 @@ pub struct App {
     rooms: Arc<Mutex<HashMap<String, broadcast::Sender<()>>>>,
     chat_bus: chat_store::Bus,
     hosts: Arc<Mutex<HashMap<String, usize>>>,
+    /// Vista del escenario que publica el anfitrión para sus invitados admitidos (solo en memoria:
+    /// la app la vuelve a enviar al reconectar).
+    stages: Arc<Mutex<HashMap<String, Value>>>,
     limits: Arc<Mutex<HashMap<String, (i64, u32)>>>,
     pub connections: Arc<AtomicUsize>,
     shutdown: watch::Sender<bool>,
@@ -164,6 +167,7 @@ impl App {
             rooms: Default::default(),
             chat_bus: Default::default(),
             hosts: Default::default(),
+            stages: Default::default(),
             limits: Default::default(),
             connections: Arc::new(AtomicUsize::new(0)),
             shutdown,
@@ -351,7 +355,7 @@ async fn guard(State(s): State<App>, req: Request, next: Next) -> Result<Respons
     Ok(r)
 }
 async fn meta(State(s): State<App>) -> Json<Value> {
-    let mut v = json!({"service":"streamhive-sessions","protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION"),"media":s.media.is_some()});
+    let mut v = json!({"service":"streamhive-sessions","protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION"),"media":s.media.is_some(),"features":["cleanup"]});
     if let Some(m) = &s.media {
         v["media_ports"] = json!({"udp":m.ports.udp,"tcp":m.ports.tcp});
         v["media_ready"] = json!(m.ready().await);
@@ -416,11 +420,22 @@ async fn create_session(State(s): State<App>, h: HeaderMap) -> Result<Json<Value
 async fn snapshot(s: &App, sid: &str, pid: Option<String>) -> Result<Value> {
     let sid = sid.to_owned();
     let online = s.online(&sid);
+    let stage = if pid.is_some() {
+        s.stages.lock().unwrap().get(&sid).cloned()
+    } else {
+        None
+    };
     s.db(move |c| {
         let session=c.query_row("SELECT id,revision,expires,closed FROM sessions WHERE id=?1",[&sid],|r|Ok(json!({"id":r.get::<_,String>(0)?,"revision":r.get::<_,i64>(1)?,"expires":r.get::<_,i64>(2)?,"closed":r.get::<_,bool>(3)?,"host_online":online}))).optional()?.ok_or_else(missing)?;
         let mut q=c.prepare("SELECT id,name,status,created FROM participants WHERE session_id=?1 ORDER BY created,id")?;
         let participants=q.query_map([&sid],|r|Ok(json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?,"created":r.get::<_,i64>(3)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
-        if let Some(pid)=pid { return Ok(json!({"session":session,"participant":participants.into_iter().find(|p|p["id"]==pid)})); }
+        if let Some(pid)=pid {
+            // Borrado al vaciar la lista: para su página cuenta como retirado (y deja de reconectar).
+            let participant=participants.into_iter().find(|p|p["id"]==pid).unwrap_or_else(||json!({"id":pid,"name":"","status":"removed"}));
+            let mut out=json!({"session":session,"participant":participant});
+            if out["participant"]["status"]=="admitted" && out["session"]["closed"]==false { if let Some(stage)=stage { out["stage"]=stage; } }
+            return Ok(out);
+        }
         let mut q=c.prepare("SELECT id,expires,revoked FROM invitations WHERE session_id=?1 ORDER BY expires")?;
         let invitations=q.query_map([&sid],|r|Ok(json!({"id":r.get::<_,String>(0)?,"expires":r.get::<_,i64>(1)?,"revoked":r.get::<_,bool>(2)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
         Ok(json!({"session":session,"participants":participants,"invitations":invitations}))
@@ -447,9 +462,31 @@ async fn close_session(
         let count=c.execute("UPDATE sessions SET closed=1,revision=revision+CASE WHEN closed=0 THEN 1 ELSE 0 END WHERE id=?1 AND installation_id=?2",params![key,owner_id])?;
         if count==0 {return Err(missing());} chat_store::close(c,&key,now())?; Ok(())
     }).await?;
+    s.stages.lock().unwrap().remove(&sid);
     s.notify(&sid);
     if let Some(m) = &s.media {
         m.close(&oid).await;
+    }
+    Ok(Json(json!({"ok":true})))
+}
+/// Lo que el anfitrión tiene en el escenario (programa, nombres, pantalla al aire, estado del
+/// directo), para que sus invitados admitidos lo vean igual. Lo arma la app de escritorio.
+const STAGE_LIMIT: usize = 16384;
+async fn publish_stage(
+    State(s): State<App>,
+    h: HeaderMap,
+    Path(sid): Path<String>,
+    Json(stage): Json<Value>,
+) -> Result<Json<Value>> {
+    let oid = owner(&s, &h).await?;
+    if !stage.is_object() || stage.to_string().len() > STAGE_LIMIT {
+        return Err(invalid("Vista del escenario no válida"));
+    }
+    let check = sid.clone();
+    s.db(move |c| session_owned(c, &check, &oid)).await?;
+    let changed = s.stages.lock().unwrap().insert(sid.clone(), stage.clone()) != Some(stage);
+    if changed {
+        s.notify(&sid);
     }
     Ok(Json(json!({"ok":true})))
 }
@@ -624,12 +661,79 @@ async fn decide(
     .await?;
     s.notify(&sid);
     // Retirado o rechazado: fuera también de la sala de cámara y audio, al momento.
+    let mut kicked = true;
     if status != "admitted" {
         if let Some(m) = &s.media {
-            m.kick(&oid, &who).await;
+            kicked = m.kick(&oid, &who).await;
         }
     }
-    Ok(Json(json!({"ok":true})))
+    Ok(Json(json!({"ok":true,"media_kick":kicked})))
+}
+#[derive(Deserialize)]
+struct Cleanup {
+    scope: String,
+}
+/// Limpia la lista de invitados de la sesión (los invitados cambian cada día):
+/// `finished` borra rechazados, retirados e invitaciones que ya no sirven;
+/// `all` saca a todos de la sala, anula todos los enlaces y deja la lista vacía.
+async fn cleanup(
+    State(s): State<App>,
+    h: HeaderMap,
+    Path(sid): Path<String>,
+    Json(b): Json<Cleanup>,
+) -> Result<Json<Value>> {
+    let all = match b.scope.as_str() {
+        "all" => true,
+        "finished" => false,
+        _ => return Err(invalid("Limpieza inválida")),
+    };
+    let oid = owner(&s, &h).await?;
+    let (key, owner_id) = (sid.clone(), oid.clone());
+    let (admitted, removed) = s
+        .db(move |c| {
+            session_owned(c, &key, &owner_id)?;
+            let tx = c.transaction()?;
+            let admitted = if all {
+                tx.prepare("SELECT id FROM participants WHERE session_id=?1 AND status='admitted'")?
+                    .query_map([&key], |r| r.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
+            let mut removed = if all {
+                tx.execute("UPDATE invitations SET revoked=1 WHERE session_id=?1", [&key])?;
+                tx.execute("DELETE FROM participants WHERE session_id=?1", [&key])?
+            } else {
+                tx.execute(
+                    "DELETE FROM participants WHERE session_id=?1 AND status IN ('removed','rejected')",
+                    [&key],
+                )?
+            };
+            // Invitaciones muertas (revocadas o caducadas) sin nadie dentro: fuera de la lista.
+            removed += tx.execute(
+                "DELETE FROM invitations WHERE session_id=?1 AND (revoked=1 OR expires<=?2) AND NOT EXISTS (SELECT 1 FROM participants p WHERE p.invitation_id=invitations.id)",
+                params![key, now()],
+            )?;
+            if removed > 0 {
+                tx.execute("UPDATE sessions SET revision=revision+1 WHERE id=?1", [&key])?;
+            }
+            tx.commit()?;
+            Ok((admitted, removed))
+        })
+        .await?;
+    if all {
+        s.stages.lock().unwrap().remove(&sid);
+    }
+    if removed > 0 || all {
+        s.notify(&sid);
+    }
+    let mut kicked = true;
+    if let Some(m) = &s.media {
+        for pid in admitted {
+            kicked &= m.kick(&oid, &pid).await;
+        }
+    }
+    Ok(Json(json!({"ok":true,"media_kick":kicked})))
 }
 #[derive(Deserialize)]
 struct EventsQuery {
@@ -812,8 +916,10 @@ pub fn router(s: App) -> Router {
         .route("/api/v1/sessions/{sid}", get(get_session))
         .route("/api/v1/sessions/{sid}/close", post(close_session))
         .route("/api/v1/sessions/{sid}/invitations", post(invitation))
+        .route("/api/v1/sessions/{sid}/stage", put(publish_stage))
         .route("/api/v1/invitations/{iid}", delete(revoke))
         .route("/api/v1/sessions/{sid}/participants/{pid}", post(decide))
+        .route("/api/v1/sessions/{sid}/cleanup", post(cleanup))
         .route("/api/v1/join/{token}", post(join).get(resume))
         .route("/api/v1/guest", get(guest_state))
         .route("/api/v1/guest/media", get(media::guest_token))
@@ -856,6 +962,15 @@ pub fn router(s: App) -> Router {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                     include_str!("../web/livekit-client.umd.js"),
+                )
+            }),
+        )
+        .route(
+            "/studio.css",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                    include_str!("../web/studio.css"),
                 )
             }),
         )

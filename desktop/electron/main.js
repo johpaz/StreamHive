@@ -1,7 +1,7 @@
 // StreamHive Desktop (Electron). Arranca LiveKit + backend (ENGINE=ffmpeg) como procesos locales,
 // abre el estudio y, durante un directo, una ventana oculta con el compositor.
 // Todo escucha en localhost y los datos viven en el directorio de usuario: no hay nube.
-const { app, BrowserWindow, ipcMain, session, desktopCapturer, dialog, shell, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, session, desktopCapturer, dialog, shell, Menu, Notification } = require("electron");
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -217,6 +217,20 @@ if (primary) app.whenReady().then(async () => {
     if (typeof rel !== "string" || !rel.startsWith("/render?") || origin(e.senderFrame.url) !== origin(base)) return;
     openRenderer(rel + (process.env.STREAMHIVE_RENDER_PARAMS || ""));
   });
+  // Alguien llegó a la sala de espera y la ventana no está al frente: aviso del sistema (al pulsarlo,
+  // la ventana vuelve al frente) y parpadeo en la barra de tareas. Las pruebas no muestran nada.
+  ipcMain.handle("attention:notify", (e, body) => {
+    if (origin(e.senderFrame.url) !== origin(base) || typeof body !== "string" || !mainWindow) return false;
+    if (mainWindow.isFocused()) return false;
+    if (process.env.STREAMHIVE_E2E) return true;
+    if (Notification.isSupported()) {
+      const n = new Notification({ title: "StreamHive", body: body.slice(0, 120), icon: windowIcon });
+      n.on("click", () => { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); });
+      n.show();
+    }
+    mainWindow.flashFrame(true);
+    return true;
+  });
   ipcMain.handle("renderer:close", () => { for (const window of rendererWindows.values()) window.close(); });
   ipcMain.handle("folder:choose", async (e, current) => {
     if (origin(e.senderFrame.url) !== origin(base)) return null;
@@ -242,6 +256,7 @@ if (primary) app.whenReady().then(async () => {
     show: !process.env.STREAMHIVE_E2E,
     webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, sandbox: true, backgroundThrottling: !process.env.STREAMHIVE_E2E },
   });
+  mainWindow.on("focus", () => mainWindow.flashFrame(false));
   // Los enlaces del chat los escriben otras personas: solo http(s) va al navegador del sistema.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//i.test(url) && origin(url) !== origin(base)) void shell.openExternal(url); return { action: "deny" }; });
   await enter();

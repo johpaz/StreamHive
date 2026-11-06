@@ -7,4 +7,6 @@ contextBridge.exposeInMainWorld("streamhiveDesktop", {
   openFolder: (folder) => ipcRenderer.invoke("folder:open", folder),
   // Vuelve a entrar al estudio con el token de esta app, sin pedir la clave.
   enter: () => ipcRenderer.invoke("session:enter"),
+  // Aviso del sistema si la ventana no está al frente (alguien llegó a la sala de espera).
+  notify: (body) => ipcRenderer.invoke("attention:notify", body),
 });

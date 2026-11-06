@@ -2376,6 +2376,7 @@ main {
 .quota-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; padding: 10px 14px 0; }
 .quota-controls label { display: flex; flex-direction: column; gap: 4px; font-size: 10px; color: #93a4b3; }
 .quota-controls select { width: 72px; padding: 5px 8px; font-size: 12px; }
+.quota-controls .retire-all { margin-left: auto; align-self: center; font-size: 12px; white-space: nowrap; }
 .quota-controls small { flex-basis: 100%; font-size: 10px; color: #e8b65a; }
 /* Tira de acompañantes: mismos tamaños que las cámaras junto al contenido. */
 .stage.layout-featured .camera-tile:not(:first-child) .lower-third { font-size: 1.15cqw; padding: 0.3cqw 0.6cqw; bottom: 0.5cqw; left: 0.5cqw; }

@@ -143,18 +143,28 @@ impl Media {
         Ok(())
     }
     /// Saca a un invitado de la sala al retirarlo o rechazarlo (sin esperar a que caduque su permiso).
-    pub async fn kick(&self, oid: &str, pid: &str) {
+    /// Reintenta una vez; `false` si LiveKit no lo confirmó (el invitado ya no puede pedir otro permiso).
+    pub async fn kick(&self, oid: &str, pid: &str) -> bool {
         let room = room(oid);
-        if let Err(e) = self
-            .rpc(
-                "RemoveParticipant",
-                json!({"roomAdmin":true,"room":room}),
-                json!({"room":room,"identity":guest_identity(pid)}),
-            )
-            .await
-        {
-            tracing::warn!("{e}");
+        for attempt in 0..2 {
+            match self
+                .rpc(
+                    "RemoveParticipant",
+                    json!({"roomAdmin":true,"room":room}),
+                    json!({"room":room,"identity":guest_identity(pid)}),
+                )
+                .await
+            {
+                Ok(()) => return true,
+                Err(e) => {
+                    tracing::warn!("{e}");
+                    if attempt == 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
         }
+        false
     }
     /// Al cerrar la sesión remota se cierra la sala: nadie queda conectado.
     pub async fn close(&self, oid: &str) {

@@ -30,3 +30,4 @@ StreamingHive.txt
 # publicadas salen de GitHub Actions (scripts/release.mjs).
 /output/streamhive-linux-*/
 /output/*.tar.gz
+/sessions/web/studio.css

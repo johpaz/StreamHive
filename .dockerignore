@@ -16,3 +16,4 @@ frontend/public/effects
 sessions/web/guest.js
 sessions/web/livekit-client.umd.js
 deploy/sessions/.env
+sessions/web/studio.css

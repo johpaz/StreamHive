@@ -644,8 +644,15 @@ async fn participant_action(
                 ));
             }
         };
-        remote::decide_guest(&s, &identity, action).await?;
-        if action != "admit" {
+        let kicked = remote::decide_guest(&s, &identity, action).await?;
+        if action == "admit" {
+            // Sin esperar al canal de control: ya está admitido en el servidor.
+            let mut d = s.data.lock().await;
+            if let Some(p) = d.participants.get_mut(&identity) {
+                p.status = "admitted".into();
+            }
+            s.persist(&mut d)?;
+        } else {
             {
                 let mut d = s.data.lock().await;
                 d.participants.remove(&identity);
@@ -656,7 +663,7 @@ async fn participant_action(
                 let _ = rtc::remove(&s, &identity).await;
             }
         }
-        return Ok(Json(json!({"ok":true})));
+        return Ok(Json(json!({"ok":true,"media_kick":kicked})));
     }
     if body.action == "mute" {
         let info = rtc::rpc(
@@ -732,6 +739,63 @@ async fn participant_action(
         }
     }
     Ok(Json(json!({"ok":true})))
+}
+/// Retira a todos los invitados, de la red local y del servidor de sesiones: salen de la sala y
+/// del programa, sus enlaces dejan de valer y no quedan en ninguna lista (son temporales).
+async fn retire_all_guests(s: &App) -> Result<bool, Error> {
+    let admitted: Vec<String> = {
+        let mut d = s.data.lock().await;
+        let local: Vec<(String, bool)> = d
+            .participants
+            .values()
+            .filter(|p| p.invite != remote::REMOTE_INVITE)
+            .map(|p| (p.id.clone(), p.status == "admitted"))
+            .collect();
+        for (id, _) in &local {
+            d.participants.remove(id);
+            d.remove_from_program(id);
+        }
+        let had_links = !d.invitations.is_empty();
+        d.invitations.clear();
+        if !local.is_empty() || had_links {
+            s.persist(&mut d)?;
+        }
+        local
+            .into_iter()
+            .filter(|(_, a)| *a)
+            .map(|(id, _)| id)
+            .collect()
+    };
+    for id in admitted {
+        let _ = rtc::remove(s, &id).await;
+    }
+    let kicked = remote::retire_all(s).await?;
+    let _ = s.events.send(());
+    Ok(kicked)
+}
+async fn participants_clear(State(s): State<App>, h: HeaderMap) -> Reply {
+    s.admin(&h)?;
+    let _guard = s.operations.lock().await;
+    let kicked = retire_all_guests(&s).await?;
+    Ok(Json(json!({"ok":true,"media_kick":kicked})))
+}
+/// Al terminar la sesión (directo o grabación) los invitados se retiran solos.
+fn retire_guests_when_sessions_end(s: App) {
+    tokio::spawn(async move {
+        let mut events = s.events.subscribe();
+        let mut running = s.data.lock().await.active().is_some();
+        loop {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv()).await;
+            let now = s.data.lock().await.active().is_some();
+            if running && !now {
+                let _guard = s.operations.lock().await;
+                if let Err(e) = retire_all_guests(&s).await {
+                    tracing::warn!("No se pudo retirar a los invitados al terminar: {}", e.1);
+                }
+            }
+            running = now;
+        }
+    });
 }
 #[derive(Deserialize, Default)]
 struct FormatQuery {
@@ -2406,10 +2470,14 @@ async fn reconcile(s: &App) -> anyhow::Result<()> {
             .filter_map(|p| {
                 let identity = p["identity"].as_str()?;
                 let kind = p["kind"].as_str().unwrap_or("");
+                // Los invitados del servidor (`g-*`) los autoriza el servidor de sesiones: solo les da
+                // permiso tras admitirlos y los expulsa al rechazarlos o retirarlos. Aquí no se
+                // juzgan, porque su estado local llega con unos segundos de retraso.
                 if identity == "host"
                     || kind == "EGRESS"
                     || p["kind"] == 2
                     || identity.starts_with("EG_")
+                    || identity.starts_with(remote::GUEST_PREFIX)
                 {
                     return None;
                 }
@@ -2492,6 +2560,7 @@ fn router(s: App) -> Router {
             "/api/v1/remote-session/participants/{id}",
             post(remote::decide),
         )
+        .route("/api/v1/participants/clear", post(participants_clear))
         .route("/api/v1/me", get(me))
         .route("/api/v1/profile", put(account::profile_update))
         .route(
@@ -2659,6 +2728,7 @@ async fn main() -> anyhow::Result<()> {
         unseal(&master, &x.sealed)
             .map_err(|_| anyhow::anyhow!("MASTER_KEY cannot decrypt the saved destinations"))?;
     }
+    tls::provider();
     // HTTPS local opcional (TLS_PORT + TLS_NAMES): cámara/micrófono de invitados en la red.
     let tls = match std::env::var("TLS_PORT")
         .ok()
@@ -2730,6 +2800,7 @@ async fn main() -> anyhow::Result<()> {
         login_attempts: Arc::new(Mutex::new((now(), 0))),
     };
     remote::start(s.clone());
+    retire_guests_when_sessions_end(s.clone());
     chat::start_pruner(s.clone());
     let worker = s.clone();
     tokio::spawn(async move {
@@ -5061,6 +5132,215 @@ mod api_tests {
                 .as_deref(),
             Some("")
         );
+        task.abort();
+    }
+    #[tokio::test]
+    async fn remote_guests_arrive_leave_and_are_cleaned_without_the_live_channel() {
+        let s = app();
+        let admin = Some(("host", "admin"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+        let db = std::env::temp_dir()
+            .join(format!("sh-remote-test-{}", id()))
+            .join("sessions.sqlite");
+        let cloud =
+            streamhive_sessions::App::open(streamhive_sessions::Config::new(&origin, db).unwrap())
+                .unwrap();
+        // The real-time channel never opens (a proxy that drops WebSockets, for instance).
+        let router = streamhive_sessions::router(cloud).layer(axum::middleware::from_fn(
+            |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                if req.uri().path() == "/api/v1/events" {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                next.run(req).await
+            },
+        ));
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        assert_eq!(
+            call(
+                &s,
+                "PUT",
+                "/api/v1/remote-server",
+                admin,
+                json!({"url":origin})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        call(&s, "POST", "/api/v1/remote-session", admin, json!({})).await;
+        remote::start(s.clone());
+        let (_, _, invite) = call(
+            &s,
+            "POST",
+            "/api/v1/remote-session/invitations",
+            admin,
+            json!({}),
+        )
+        .await;
+        let join = |name: &'static str| {
+            let url = invite["url"]
+                .as_str()
+                .unwrap()
+                .replace("/join/", "/api/v1/join/");
+            async move {
+                let r: Value = reqwest::Client::new()
+                    .post(url)
+                    .json(&json!({"name":name}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                format!(
+                    "{}{}",
+                    remote::GUEST_PREFIX,
+                    r["participant_id"].as_str().unwrap()
+                )
+            }
+        };
+        let ana = join("Ana").await;
+        let luis = join("Luis").await;
+        // They reach the studio's waiting room anyway, by polling.
+        let mut seen = false;
+        for _ in 0..80 {
+            let d = s.data.lock().await;
+            if [&ana, &luis].iter().all(|id| {
+                d.participants
+                    .get(*id)
+                    .is_some_and(|p| p.status == "waiting")
+            }) {
+                seen = true;
+                break;
+            }
+            drop(d);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(seen, "waiting guests never reached the studio");
+        let (_, _, view) = call(&s, "GET", "/api/v1/remote-server", admin, Value::Null).await;
+        assert_ne!(view["status"], "connected");
+        assert!(view["down_since"].as_u64().is_some());
+        // Rejecting from the server list takes them out of the studio right away.
+        let pid = ana.strip_prefix(remote::GUEST_PREFIX).unwrap();
+        let (code, _, r) = call(
+            &s,
+            "POST",
+            &format!("/api/v1/remote-session/participants/{pid}"),
+            admin,
+            json!({"action":"reject"}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(r["media_kick"], true);
+        assert!(!s.data.lock().await.participants.contains_key(&ana));
+        let (_, _, view) = call(&s, "GET", "/api/v1/remote-server", admin, Value::Null).await;
+        let mut statuses: Vec<_> = view["snapshot"]["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["status"].as_str().unwrap().to_owned())
+            .collect();
+        statuses.sort();
+        assert_eq!(statuses, ["rejected", "waiting"]);
+        // Guests are temporary: when the session ends, everyone goes (home network and server),
+        // with their links, and nobody is left in any list.
+        let home = |id: &str, status: &str| model::Participant {
+            id: id.into(),
+            name: "Casa".into(),
+            status: status.into(),
+            invite: "home".into(),
+            created: now(),
+            connected: false,
+        };
+        {
+            let mut d = s.data.lock().await;
+            d.participants
+                .insert("casa".into(), home("casa", "admitted"));
+            d.participants.insert("old".into(), home("old", "removed"));
+            d.invitations.insert(
+                "home".into(),
+                model::Invitation {
+                    id: "home".into(),
+                    hash: "x".into(),
+                    expires: now() + 3600,
+                    revoked: false,
+                },
+            );
+        }
+        retire_guests_when_sessions_end(s.clone());
+        let (c, _, v) = call(&s, "POST", "/api/v1/recording/start", admin, Value::Null).await;
+        assert_eq!(c, StatusCode::OK, "{v}");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(s.data.lock().await.participants.contains_key("casa"));
+        s.data.lock().await.broadcasts.last_mut().unwrap().status = "complete".into();
+        let _ = s.events.send(());
+        let mut gone = false;
+        for _ in 0..50 {
+            {
+                let d = s.data.lock().await;
+                if d.participants.is_empty() && d.invitations.is_empty() {
+                    gone = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(gone, "guests left after the session ended");
+        let (_, _, view) = call(&s, "GET", "/api/v1/remote-server", admin, Value::Null).await;
+        assert_eq!(view["snapshot"]["participants"], json!([]));
+        assert_eq!(view["snapshot"]["invitations"], json!([]));
+        // The old link no longer works.
+        let old = reqwest::Client::new()
+            .post(
+                invite["url"]
+                    .as_str()
+                    .unwrap()
+                    .replace("/join/", "/api/v1/join/"),
+            )
+            .json(&json!({"name":"Tarde"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(old.status().as_u16(), 410);
+        // "Retirar a todos": admin only, and it empties everything at any moment.
+        let (_, _, invite) = call(
+            &s,
+            "POST",
+            "/api/v1/remote-session/invitations",
+            admin,
+            json!({}),
+        )
+        .await;
+        reqwest::Client::new()
+            .post(
+                invite["url"]
+                    .as_str()
+                    .unwrap()
+                    .replace("/join/", "/api/v1/join/"),
+            )
+            .json(&json!({"name":"Marta"}))
+            .send()
+            .await
+            .unwrap();
+        s.data
+            .lock()
+            .await
+            .participants
+            .insert("casa".into(), home("casa", "waiting"));
+        assert_eq!(
+            call(&s, "POST", "/api/v1/participants/clear", None, Value::Null)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (c, _, r) = call(&s, "POST", "/api/v1/participants/clear", admin, Value::Null).await;
+        assert_eq!(c, StatusCode::OK);
+        assert_eq!(r["media_kick"], true);
+        assert!(s.data.lock().await.participants.is_empty());
+        let (_, _, view) = call(&s, "GET", "/api/v1/remote-server", admin, Value::Null).await;
+        assert_eq!(view["snapshot"]["participants"], json!([]));
+        assert_eq!(view["snapshot"]["invitations"], json!([]));
         task.abort();
     }
     #[tokio::test]

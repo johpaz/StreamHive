@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { desktopNotify } from "./desktop";
 
 type Waiting = { id: string; name: string };
 
@@ -61,18 +62,25 @@ export function ArrivalAlert({
     const person = fresh[fresh.length - 1];
     setLatest(person);
     chime();
-    if (document.hidden && "Notification" in window) {
-      const notify = () =>
-        new Notification("StreamHive", {
-          body: `${person.name} quiere entrar`,
+    const body = `${person.name} quiere entrar`;
+    // En la app de escritorio avisa el sistema (si la ventana no está al frente); en un navegador,
+    // la notificación web cuando la pestaña no está a la vista o no tiene el foco.
+    void desktopNotify(body).then((handled) => {
+      if (handled !== null) return;
+      if (!(document.hidden || !document.hasFocus()) || !("Notification" in window)) return;
+      const notify = () => {
+        const n = new Notification("StreamHive", {
+          body,
           tag: "streamhive-waiting",
         });
+        n.onclick = () => window.focus();
+      };
       if (Notification.permission === "granted") notify();
       else if (Notification.permission !== "denied")
         void Notification.requestPermission().then(
           (p) => p === "granted" && notify(),
         );
-    }
+    });
   }, [waiting.map((p) => p.id).join(",")]);
   // Aviso pasajero: el sonido y el contador «N personas esperan» se quedan.
   useEffect(() => {

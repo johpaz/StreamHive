@@ -1,9 +1,9 @@
 import { StudioChat } from "./StudioChat";
 import { chatSignal } from "./chat";
-import { GuestMedia } from "./GuestMedia";
+import { GuestStudio, type GuestStage } from "./GuestStudio";
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-type Snapshot = {session:{id:string;host_online:boolean;closed:boolean;expires:number};participant:{id:string;name:string;status:string}|null};
+type Snapshot = {session:{id:string;host_online:boolean;closed:boolean;expires:number};participant:{id:string;name:string;status:string}|null;stage?:GuestStage};
 function Guest() {
   const [media,setMedia]=useState(false);
   useEffect(()=>{void fetch("/api/v1/meta").then(r=>r.json()).then(m=>setMedia(m.media===true)).catch(()=>{});},[]);
@@ -23,7 +23,8 @@ function Guest() {
   },[session]);
   const status=state?.participant?.status;const closed=Boolean(state?.session.closed||(state&&state.session.expires*1000<Date.now()));
   const admitted=!closed&&status==="admitted";
-  return <main className={admitted&&media?"with-media":""}><span className="brand">StreamHive</span><h1>Entrada de invitados</h1>
+  if(admitted&&media&&state?.participant)return <GuestStudio key={state.participant.id} me={state.participant} sessionId={session} stage={state.stage??null} hostOnline={Boolean(state.session.host_online)} online={connected}/>;
+  return <main><span className="brand">StreamHive</span><h1>Entrada de invitados</h1>
     {!token&&!session?<p>Abre el enlace de invitación que te envió el anfitrión.</p>:!session?<form onSubmit={async(e)=>{
       e.preventDefault();setBusy(true);setError("");try{
         const r=await fetch(`/api/v1/join/${encodeURIComponent(token)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})});const data=await r.json();if(!r.ok)throw Error(data.error);
@@ -34,10 +35,9 @@ function Guest() {
       {state?.participant&&<p>{state.participant.name}</p>}
       {!closed&&!["removed","rejected"].includes(status??"")&&<p>{!connected?"Reconectando con el servidor…":state?.session.host_online?"El anfitrión está conectado.":"El anfitrión no está conectado. Tu solicitud se conserva."}</p>}
     </>}
-    {admitted&&media&&<GuestMedia key={state?.participant?.id}/>}
     {!closed&&(status==="admitted"||status==="waiting")&&state?.participant&&<StudioChat key={session+state.participant.id} me={{id:state.participant.id,role:"guest"}} sessionId={session}/>}
     {error&&<p className="error" role="alert">{error}</p>}
-    {!(admitted&&media)&&<p className="notice">{media?"Cuando el anfitrión te admita podrás conectar tu cámara y tu micrófono aquí mismo. Usa un navegador actual en ordenador o móvil.":"Esta página gestiona tu entrada y el chat. Este servidor no tiene cámara ni audio."}</p>}
+    {<p className="notice">{media?"Cuando el anfitrión te admita podrás conectar tu cámara y tu micrófono aquí mismo. Usa un navegador actual en ordenador o móvil.":"Esta página gestiona tu entrada y el chat. Este servidor no tiene cámara ni audio."}</p>}
   </main>;
 }
 createRoot(document.getElementById("root")!).render(<Guest/>);

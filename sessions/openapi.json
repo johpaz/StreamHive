@@ -979,6 +979,117 @@
           }
         }
       }
+    },
+    "/api/v1/sessions/{sid}/stage": {
+      "put": {
+        "summary": "Publicar la vista del escenario para los invitados admitidos",
+        "description": "Solo la instalación propietaria. Objeto JSON de hasta 16 KB (programa, nombres, pantalla al aire, estado del directo) que reciben en su snapshot los invitados admitidos. Se guarda en memoria; la app lo reenvía al reconectar.",
+        "security": [
+          {
+            "installation": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Publicada"
+          },
+          "400": {
+            "description": "No es un objeto o supera 16 KB"
+          },
+          "404": {
+            "description": "Sesión inexistente o de otra instalación"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sid}/cleanup": {
+      "post": {
+        "summary": "Limpiar la lista de invitados",
+        "description": "Solo la instalación propietaria. `finished` borra los participantes rechazados o retirados y las invitaciones revocadas o caducadas sin nadie dentro. `all` saca a todos de la sala de cámara y audio, revoca y borra todas las invitaciones y participantes y descarta el escenario publicado; la sesión sigue abierta. `media_kick` es false si la sala de LiveKit no confirmó la expulsión.",
+        "security": [
+          {
+            "installation": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "scope"
+                ],
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "finished",
+                      "all"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lista limpia",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "media_kick": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Alcance inválido"
+          },
+          "404": {
+            "description": "Sesión inexistente o de otra instalación"
+          }
+        }
+      }
     }
   },
   "components": {

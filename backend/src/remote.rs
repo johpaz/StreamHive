@@ -88,8 +88,16 @@ fn update(
     snapshot: Option<Value>,
     message: Option<&str>,
 ) {
-    *s.remote.state.lock().unwrap() =
-        json!({"url":url,"status":status,"snapshot":snapshot,"error":message});
+    let mut state = s.remote.state.lock().unwrap();
+    // Desde cuándo no llega nada en tiempo real (la app avisa si dura) y qué sabe hacer el servidor.
+    let down_since = match status {
+        "connected" | "unconfigured" => Value::Null,
+        _ if state["down_since"].is_null() => json!(crate::now()),
+        _ => state["down_since"].clone(),
+    };
+    let features = state["features"].clone();
+    *state = json!({"url":url,"status":status,"snapshot":snapshot,"error":message,"down_since":down_since,"features":features});
+    drop(state);
     let _ = s.events.send(());
 }
 pub fn normalize(raw: &str) -> Result<String, Error> {
@@ -398,17 +406,8 @@ pub async fn decide(
     {
         return Err(bad("Acción o participante inválido"));
     }
-    let c = configured(&s).await?;
-    let sid = current_id(&s)?;
-    request(
-        &c.url,
-        Some(credential(&s, &c)?),
-        reqwest::Method::POST,
-        &format!("/sessions/{sid}/participants/{pid}"),
-        Some(json!({"action":b.action})),
-    )
-    .await
-    .map(Json)
+    let r = decide_guest(&s, &format!("{GUEST_PREFIX}{pid}"), &b.action).await?;
+    Ok(Json(json!({"ok":true,"media_kick":r})))
 }
 pub async fn revoke(State(s): State<App>, h: HeaderMap, Path(iid): Path<String>) -> Reply {
     s.admin(&h)?;
@@ -427,6 +426,8 @@ pub async fn revoke(State(s): State<App>, h: HeaderMap, Path(iid): Path<String>)
     .map(Json)
 }
 /// Marca de los participantes del estudio que son invitados del servidor (`g-<id>`).
+/// Identidad de sala de los invitados del servidor de sesiones (reservada allí).
+pub const GUEST_PREFIX: &str = "g-";
 pub const REMOTE_INVITE: &str = "remote";
 /// Invitados del servidor = participantes del estudio (`g-<id>`): quien espera aparece en la sala
 /// de espera del estudio (con aviso), y los admitidos en Fuentes → Participantes cuando la cámara
@@ -441,7 +442,7 @@ pub async fn sync_guests(s: &App) {
             .filter(|p| p["status"] == "waiting" || (media && p["status"] == "admitted"))
             .filter_map(|p| {
                 Some((
-                    format!("g-{}", p["id"].as_str()?),
+                    format!("{GUEST_PREFIX}{}", p["id"].as_str()?),
                     p["name"].as_str()?.to_owned(),
                     p["status"].as_str()?.to_owned(),
                 ))
@@ -491,11 +492,13 @@ pub async fn sync_guests(s: &App) {
     }
 }
 /// Decide en el servidor sobre un invitado remoto desde el estudio (`g-<id>`): admit, reject o remove.
-pub async fn decide_guest(s: &App, identity: &str, action: &str) -> Result<(), Error> {
-    let pid = identity.strip_prefix("g-").ok_or_else(denied)?;
+/// El estudio lo aplica al momento, sin esperar al canal de control (que puede estar caído).
+/// Devuelve `false` si la sala de cámara del servidor no confirmó la expulsión.
+pub async fn decide_guest(s: &App, identity: &str, action: &str) -> Result<bool, Error> {
+    let pid = identity.strip_prefix(GUEST_PREFIX).ok_or_else(denied)?;
     let c = configured(s).await?;
     let sid = current_id(s)?;
-    request(
+    let r = request(
         &c.url,
         Some(credential(s, &c)?),
         reqwest::Method::POST,
@@ -503,9 +506,205 @@ pub async fn decide_guest(s: &App, identity: &str, action: &str) -> Result<(), E
         Some(json!({"action":action})),
     )
     .await?;
-    Ok(())
+    if action != "admit" {
+        forget_guests(s, |id| id == identity).await;
+    }
+    refresh(s, &c, &sid).await;
+    Ok(r["media_kick"] != false)
 }
+/// Quita del estudio (y del programa) a los invitados del servidor que cumplan `which`.
+async fn forget_guests(s: &App, which: impl Fn(&str) -> bool) {
+    let mut d = s.data.lock().await;
+    let gone: Vec<String> = d
+        .participants
+        .values()
+        .filter(|p| p.invite == REMOTE_INVITE && which(&p.id))
+        .map(|p| p.id.clone())
+        .collect();
+    for id in &gone {
+        d.participants.remove(id);
+        d.remove_from_program(id);
+    }
+    if !gone.is_empty() {
+        let _ = s.persist(&mut d);
+    }
+}
+/// Trae la lista del servidor y la aplica en el estudio sin esperar al canal de control.
+async fn refresh(s: &App, c: &Saved, sid: &str) {
+    let Ok(token) = credential(s, c) else { return };
+    if let Ok(snapshot) = request(
+        &c.url,
+        Some(token),
+        reqwest::Method::GET,
+        &format!("/sessions/{sid}"),
+        None,
+    )
+    .await
+    {
+        let mut state = s.remote.state.lock().unwrap();
+        if state["snapshot"]["session"]["id"] == sid && snapshot["session"]["closed"] != true {
+            state["snapshot"] = snapshot;
+        }
+    }
+    sync_guests(s).await;
+    let _ = s.events.send(());
+}
+/// Retira a todos los invitados del servidor (los invitados son temporales): saca de la sala a
+/// quien está dentro, rechaza a quien espera, anula todos los enlaces y deja la lista vacía.
+/// Devuelve `false` si la sala de cámara del servidor no confirmó alguna expulsión.
+pub async fn retire_all(s: &App) -> Result<bool, Error> {
+    let (Some(c), Ok(sid)) = (saved(s)?, current_id(s)) else {
+        forget_guests(s, |_| true).await;
+        return Ok(true);
+    };
+    let token = credential(s, &c)?;
+    let features = s.remote.state.lock().unwrap()["features"].clone();
+    let mut kicked = true;
+    if features
+        .as_array()
+        .is_some_and(|f| f.iter().any(|x| x == "cleanup"))
+    {
+        let r = request(
+            &c.url,
+            Some(token),
+            reqwest::Method::POST,
+            &format!("/sessions/{sid}/cleanup"),
+            Some(json!({"scope":"all"})),
+        )
+        .await?;
+        kicked = r["media_kick"] != false;
+    } else {
+        // Servidor anterior a la limpieza: uno a uno, y los enlaces revocados.
+        let snapshot = s.remote.state.lock().unwrap()["snapshot"].clone();
+        for p in snapshot["participants"].as_array().into_iter().flatten() {
+            let action = match p["status"].as_str() {
+                Some("waiting") => "reject",
+                Some("admitted") => "remove",
+                _ => continue,
+            };
+            let Some(pid) = p["id"].as_str() else {
+                continue;
+            };
+            let r = request(
+                &c.url,
+                Some(token.clone()),
+                reqwest::Method::POST,
+                &format!("/sessions/{sid}/participants/{pid}"),
+                Some(json!({"action":action})),
+            )
+            .await?;
+            kicked &= r["media_kick"] != false;
+        }
+        for i in snapshot["invitations"].as_array().into_iter().flatten() {
+            if i["revoked"] == true {
+                continue;
+            }
+            let Some(iid) = i["id"].as_str() else {
+                continue;
+            };
+            request(
+                &c.url,
+                Some(token.clone()),
+                reqwest::Method::DELETE,
+                &format!("/invitations/{iid}"),
+                None,
+            )
+            .await?;
+        }
+    }
+    forget_guests(s, |_| true).await;
+    refresh(s, &c, &sid).await;
+    Ok(kicked)
+}
+/// Lo que ven los invitados del servidor: el programa horizontal tal como lo tiene el anfitrión,
+/// sin rutas de archivos de este equipo (logos, fondos, vídeos y música no salen de aquí).
+pub fn stage_view(d: &crate::model::Data) -> Value {
+    let local = |v: &mut Value, key: &str| {
+        if v[key].as_str().is_some_and(|x| !x.starts_with("data:")) {
+            v[key] = Value::Null;
+        }
+    };
+    let mut program = serde_json::to_value(&d.program).unwrap_or_default();
+    let file = program["media_asset"].is_string();
+    for key in ["logo", "media_asset", "background_asset"] {
+        local(&mut program, key);
+    }
+    let slate = d.active_slate.as_ref().map(|a| {
+        let mut slate = serde_json::to_value(d.slates.get(a.kind)).unwrap_or_default();
+        for key in ["logo_asset", "background_asset", "music_asset"] {
+            slate[key] = Value::Null;
+        }
+        json!({"kind":a.kind,"ends_at_ms":a.ends_at_ms,"slate":slate})
+    });
+    let host = d
+        .profile
+        .as_ref()
+        .map(|p| p.name.trim())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("Anfitrión");
+    let mut names = serde_json::Map::new();
+    names.insert("host".into(), json!(host));
+    for p in d.participants.values().filter(|p| p.status == "admitted") {
+        names.insert(p.id.clone(), json!(p.name));
+    }
+    let broadcast = d.broadcasts.last().filter(|b| {
+        ["starting", "live", "reconnecting", "ending", "uncertain"].contains(&b.status.as_str())
+    });
+    json!({
+        "program": program,
+        "file": file,
+        "names": names,
+        "slate": slate,
+        "live": broadcast.is_some_and(|b| b.live),
+        "recording": broadcast.is_some_and(|b| b.recording),
+    })
+}
+
+/// Publica la vista del escenario en el servidor cuando cambia (y cada 30 s, por si el servidor
+/// se reinició y la perdió).
+fn publish_stage(s: App) {
+    tokio::spawn(async move {
+        let mut events = s.events.subscribe();
+        let mut last: Option<(String, Value)> = None;
+        let mut sent = std::time::Instant::now();
+        loop {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(30), events.recv()).await;
+            // Agrupa ráfagas de cambios (arrastrar, varios ajustes seguidos).
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            while events.try_recv().is_ok() {}
+            let sid = s.remote.state.lock().unwrap()["snapshot"]["session"]["id"]
+                .as_str()
+                .map(str::to_owned);
+            let (Some(sid), Some(c)) = (sid, saved(&s).ok().flatten()) else {
+                continue;
+            };
+            let view = stage_view(&*s.data.lock().await);
+            let fresh = sent.elapsed() < std::time::Duration::from_secs(30);
+            if fresh && last.as_ref() == Some(&(sid.clone(), view.clone())) {
+                continue;
+            }
+            let Ok(token) = credential(&s, &c) else {
+                continue;
+            };
+            if request(
+                &c.url,
+                Some(token),
+                reqwest::Method::PUT,
+                &format!("/sessions/{sid}/stage"),
+                Some(view.clone()),
+            )
+            .await
+            .is_ok()
+            {
+                last = Some((sid, view));
+                sent = std::time::Instant::now();
+            }
+        }
+    });
+}
+
 pub fn start(s: App) {
+    publish_stage(s.clone());
     tokio::spawn(async move {
         let mut changes = s.remote.changes.subscribe();
         loop {
@@ -516,6 +715,7 @@ pub fn start(s: App) {
                     let attempt = async {
                         let meta = verify(&c.url).await?;
                         remember_media(&s, &meta)?;
+                        s.remote.state.lock().unwrap()["features"] = meta["features"].clone();
                         let snapshot = request(
                             &c.url,
                             Some(credential(&s, &c)?),
@@ -612,7 +812,9 @@ pub fn start(s: App) {
                         {
                             break;
                         }
-                        delay = (delay * 2).min(30);
+                        // Sin canal en tiempo real se vuelve a pedir la lista cada 5 s como mucho:
+                        // quien llega a la sala de espera aparece igualmente (con su aviso).
+                        delay = (delay * 2).min(5);
                     } else {
                         delay = 1;
                     }
@@ -736,4 +938,46 @@ pub async fn chat_file(s: &App, sid: &str, id: &str) -> Result<(String, String, 
         bytes.extend_from_slice(&chunk);
     }
     Ok((mime, disposition, bytes))
+}
+
+#[cfg(test)]
+mod wss_tests {
+    /// Sin proveedor TLS fijado, rustls (ring + aws-lc compilados a la vez) no elige ninguno y el
+    /// canal de control por wss:// entra en pánico. `crate::tls::provider()` lo fija al arrancar.
+    #[tokio::test]
+    async fn control_channel_over_wss_reaches_tls() {
+        crate::tls::provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        });
+        let attempt = tokio::spawn(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            tokio_tungstenite::connect_async(format!("wss://127.0.0.1:{port}/api/v1/events")),
+        ));
+        // Error de TLS o tiempo agotado: lo que no puede pasar es un pánico.
+        assert!(attempt.await.is_ok(), "wss connect panicked");
+    }
+
+    #[test]
+    fn stage_view_never_carries_local_files() {
+        let mut d = crate::model::Data::default();
+        d.program.logo = Some("/api/v1/assets/logo/file".into());
+        d.program.media_asset = Some("video-1".into());
+        d.program.background_asset = Some("bg".into());
+        let v = super::stage_view(&d);
+        assert!(v["program"]["logo"].is_null());
+        assert!(v["program"]["media_asset"].is_null());
+        assert!(v["program"]["background_asset"].is_null());
+        assert_eq!(v["file"], true);
+        assert_eq!(v["names"]["host"], "Anfitrión");
+        assert_eq!(v["live"], false);
+        d.program.logo = Some("data:image/png;base64,AAAA".into());
+        assert_eq!(
+            super::stage_view(&d)["program"]["logo"],
+            "data:image/png;base64,AAAA"
+        );
+    }
 }

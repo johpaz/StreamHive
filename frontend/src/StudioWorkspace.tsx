@@ -63,6 +63,7 @@ function formatTime(seconds: number) {
     .padStart(2, "0")}`;
 }
 import { ResourceMonitor } from "./ResourceMonitor";
+import { RemoteLinkPill } from "./RemoteSessions";
 import { CameraQualityDialog } from "./CameraQualityDialog";
 export function StudioWorkspace({
   format = "landscape",
@@ -140,6 +141,10 @@ export function StudioWorkspace({
   const asset = assets.find((a) => a.id === p.media_asset);
   const content = p.layout === "screen";
   const waiting = studio.participants.filter((x) => x.status === "waiting");
+  // Invitados temporales: los de la red local y los del servidor, en la sala o esperando.
+  const guests = studio.participants.filter(
+    (x) => x.status === "admitted" || x.status === "waiting",
+  ).length;
   const cameraPeople: Person[] = [
     {
       id: "host",
@@ -434,6 +439,23 @@ export function StudioWorkspace({
                     </label>
                     {p.identities.length > screenCap && (
                       <small>Hay más cámaras que el cupo: quita alguna para respetarlo.</small>
+                    )}
+                    {guests > 0 && (
+                      <button
+                        className="text-button red retire-all"
+                        disabled={pending}
+                        title="Saca a todos los invitados de la sala y de la sala de espera, y anula sus enlaces"
+                        onClick={() => {
+                          if (
+                            confirm(
+                              `Se sacará a ${guests === 1 ? "1 invitado" : `${guests} invitados`} (en la sala y en espera) y dejarán de valer todos los enlaces de invitación. ¿Retirar a todos?`,
+                            )
+                          )
+                            onAction(() => api("/participants/clear", "POST"));
+                        }}
+                      >
+                        Retirar a todos
+                      </button>
                     )}
                   </div>
                 )}
@@ -1290,6 +1312,7 @@ export function StudioWorkspace({
         </button>
       )}
       <span className="focus-strip-end">
+        {admin && <RemoteLinkPill version={studio} />}
         <ResourceMonitor />
         {onInvite && (
           <button className="button" disabled={pending} onClick={onInvite}>

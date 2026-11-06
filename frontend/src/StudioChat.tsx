@@ -152,14 +152,17 @@ function useBroadcastBarLift() {
 export function StudioChat({
   me,
   sessionId,
+  docked = false,
 }: {
   me: { id: string; role: "admin" | "guest" };
   sessionId?: string;
+  /** Fijo dentro de un panel (portal de invitados): siempre abierto, sin burbuja flotante. */
+  docked?: boolean;
 }) {
   const [viewerId, setViewerId] = useState(me.id);
   const viewer = useRef(me.id);
   const scroll = useRef(0);
-  const [size, setSize] = useState<ChatSize>("reduced");
+  const [size, setSize] = useState<ChatSize>(docked ? "medium" : "reduced");
   const lift = useBroadcastBarLift();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState<Pending[]>([]);
@@ -385,7 +388,7 @@ export function StudioChat({
         return;
       if (e.key === "Escape") {
         e.preventDefault();
-        setSize(size === "full" ? "medium" : "reduced");
+        setSize(size === "full" || docked ? "medium" : "reduced");
       }
       if (size === "full" && e.key === "Tab") {
         const items = [
@@ -588,10 +591,10 @@ export function StudioChat({
     }
   };
   const full = size === "full";
-  return createPortal(
+  const chat = (
     <div
-      className={`studio-chat studio-chat-${size}`}
-      style={{ "--chat-lift": `${full ? 0 : lift}px` } as CSSProperties}
+      className={`studio-chat studio-chat-${size} ${docked && !full ? "studio-chat-docked" : ""}`}
+      style={{ "--chat-lift": `${full || docked ? 0 : lift}px` } as CSSProperties}
     >
       <div
         className="chat-sr-only"
@@ -639,13 +642,15 @@ export function StudioChat({
             >
               {full ? "↙" : "⛶"}
             </button>
-            <button
-              type="button"
-              aria-label="Reducir chat"
-              onClick={() => setSize("reduced")}
-            >
-              −
-            </button>
+            {!docked && (
+              <button
+                type="button"
+                aria-label="Reducir chat"
+                onClick={() => setSize("reduced")}
+              >
+                −
+              </button>
+            )}
           </header>
           {confirmReset ? (
             <div className="chat-confirm">
@@ -898,7 +903,7 @@ export function StudioChat({
           )}
         </section>
       )}
-    </div>,
-    document.body,
+    </div>
   );
+  return docked && !full ? chat : createPortal(chat, document.body);
 }

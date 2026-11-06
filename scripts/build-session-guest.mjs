@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { scopeCss } from "./scope-css.mjs";
 import { resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const result = await Bun.build({
@@ -21,6 +22,15 @@ await Bun.write(
 await Bun.write(
   resolve(root, "sessions/web/chat.css"),
   Bun.file(resolve(root, "frontend/dist/session-guest/guest.css")),
+);
+
+// Estilos del estudio, encerrados en .guest-studio: el invitado admitido ve el escenario y los
+// controles igual que en la app, sin alterar la página de entrada.
+await Bun.write(
+  resolve(root, "sessions/web/studio.css"),
+  ["style.css", "workspace.css"]
+    .map((f) => scopeCss(readFileSync(resolve(root, "frontend/src", f), "utf8"), ".guest-studio"))
+    .join("\n"),
 );
 
 // Cámara y audio del invitado: el SDK de LiveKit se sirve desde el propio servidor (su CSP solo

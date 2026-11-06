@@ -3,8 +3,8 @@ WORKDIR /app
 COPY frontend/package.json frontend/bun.lock ./frontend/
 RUN cd frontend && bun install --frozen-lockfile
 COPY frontend/src frontend/src
-COPY scripts/build-session-guest.mjs scripts/vendor-sdk.mjs scripts/
-# El mismo paquete que en desarrollo: guest.js y el CSS del chat.
+COPY scripts/build-session-guest.mjs scripts/vendor-sdk.mjs scripts/scope-css.mjs scripts/
+# El mismo paquete que en desarrollo: guest.js, el CSS del chat y el del estudio.
 RUN bun scripts/build-session-guest.mjs
 
 FROM docker.io/library/rust:1.96-bookworm AS build
@@ -12,7 +12,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY backend backend
 COPY sessions sessions
-COPY --from=guest /app/sessions/web/guest.js /app/sessions/web/chat.css /app/sessions/web/livekit-client.umd.js sessions/web/
+COPY --from=guest /app/sessions/web/guest.js /app/sessions/web/chat.css /app/sessions/web/studio.css /app/sessions/web/livekit-client.umd.js sessions/web/
 RUN cargo build --release --locked -p streamhive-sessions
 
 FROM docker.io/library/debian:bookworm-slim

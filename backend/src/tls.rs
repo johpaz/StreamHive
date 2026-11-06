@@ -39,11 +39,17 @@ fn write_secret(path: &Path, data: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// reqwest (ring) y axum-server (aws-lc) coexisten: rustls no elige solo y cualquier cliente
+/// TLS sin proveedor propio (el canal de control wss:// del servidor de sesiones) entraría en
+/// pánico. Se fija ring para todo el proceso, al arrancar.
+pub fn provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Carga la CA y el certificado de `dir`, o los crea. El certificado se regenera si cambian los
 /// nombres (p. ej. otra IP en la red) o le quedan menos de 30 días.
 pub async fn load_or_create(dir: &Path, names: &[String]) -> anyhow::Result<Tls> {
-    // reqwest (ring) y axum-server (aws-lc) coexisten: hay que fijar un proveedor explícito.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    provider();
     fs::create_dir_all(dir)?;
     let (ca_pem_f, ca_key_f) = (dir.join("ca.pem"), dir.join("ca.key"));
     let (leaf_f, leaf_key_f, names_f) = (

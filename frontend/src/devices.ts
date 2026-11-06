@@ -125,3 +125,31 @@ export function stopPreview(preview: {
   preview.audio?.getTracks().forEach((t) => t.stop());
   preview.video?.getTracks().forEach((t) => t.stop());
 }
+/**
+ * Lista de micrófonos, cámaras y altavoces con su nombre real. El navegador oculta los nombres
+ * hasta que la página tiene permiso; si faltan, se pide un momento cada tipo por separado (uno
+ * denegado no impide ver el otro), se suelta enseguida y se vuelve a listar.
+ */
+export async function listDevices(
+  devices: Pick<MediaDevices, "getUserMedia" | "enumerateDevices">,
+): Promise<MediaDeviceInfo[]> {
+  const first = await devices.enumerateDevices();
+  const hidden = (kind: MediaDeviceKind) =>
+    first.some((d) => d.kind === kind && !d.label);
+  const ask = [
+    hidden("audioinput") && { audio: true, video: false },
+    hidden("videoinput") && { audio: false, video: true },
+  ].filter(Boolean) as MediaStreamConstraints[];
+  if (!ask.length) return first;
+  let granted = false;
+  for (const constraints of ask) {
+    try {
+      const stream = await devices.getUserMedia(constraints);
+      stream.getTracks().forEach((t) => t.stop());
+      granted = true;
+    } catch {
+      // Sin permiso para este tipo: se queda con el nombre genérico.
+    }
+  }
+  return granted ? devices.enumerateDevices() : first;
+}

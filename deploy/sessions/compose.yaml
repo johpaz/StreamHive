@@ -10,7 +10,7 @@
 name: ${COMPOSE_PROJECT_NAME:-streamhive-sessions}
 
 x-sessions-image: &sessions-image
-  image: ${SESSIONS_IMAGE:-johpaz/streamhive-sessions}:${SESSIONS_TAG:-0.2.0}
+  image: ${SESSIONS_IMAGE:-johpaz/streamhive-sessions}:${SESSIONS_TAG:-0.2.2}
 
 x-hardening: &hardening
   user: "1000:1000"

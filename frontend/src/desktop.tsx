@@ -6,6 +6,7 @@ type DesktopBridge = {
   chooseFolder?: (current: string) => Promise<string | null>;
   openFolder?: (folder: string) => Promise<string | void>;
   enter?: () => Promise<boolean>;
+  notify?: (body: string) => Promise<boolean>;
 };
 // Lo expone el preload de Electron (desktop/electron/preload.js).
 export const desktopBridge = (): DesktopBridge | undefined =>
@@ -15,6 +16,17 @@ export const isDesktop = () => Boolean(desktopBridge());
 export const desktopEnter = async () => {
   try {
     return (await desktopBridge()?.enter?.()) === true;
+  } catch {
+    return false;
+  }
+};
+
+/** Aviso del sistema de la app de escritorio; `null` fuera de ella (lo hace el navegador). */
+export const desktopNotify = async (body: string): Promise<boolean | null> => {
+  const notify = desktopBridge()?.notify;
+  if (!notify) return null;
+  try {
+    return await notify(body);
   } catch {
     return false;
   }
